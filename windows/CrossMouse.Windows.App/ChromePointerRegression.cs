@@ -161,10 +161,30 @@ internal static class ChromePointerRegression
     }
     private static Bitmap Crop(Rectangle region)
     {
+        // Graphics.CopyFromScreen validates enum members and rejects the
+        // SRCCOPY|CAPTUREBLT combination. Native BitBlt accepts it and includes
+        // the layered pointer rather than silently testing the browser alone.
         var bitmap = new Bitmap(region.Width, region.Height);
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.CopyFromScreen(region.Location, Point.Empty, region.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
-        return bitmap;
+        try
+        {
+            using var graphics = Graphics.FromImage(bitmap);
+            nint source = GetDC(0);
+            if (source == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            nint destination = 0;
+            try
+            {
+                destination = graphics.GetHdc();
+                if (!BitBlt(destination, 0, 0, region.Width, region.Height, source, region.X, region.Y, 0x40CC0020))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CI layered crop failed.");
+            }
+            finally
+            {
+                if (destination != 0) graphics.ReleaseHdc(destination);
+                ReleaseDC(0, source);
+            }
+            return bitmap;
+        }
+        catch { bitmap.Dispose(); throw; }
     }
     private sealed class Cdp : IDisposable
     {
@@ -207,4 +227,8 @@ internal static class ChromePointerRegression
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(nint window, StringBuilder name, int count);
     [DllImport("user32.dll")] private static extern bool PostMessageW(nint window, uint message, nuint wParam, nint lParam);
     [DllImport("dwmapi.dll")] private static extern int DwmFlush();
+    [DllImport("user32.dll", SetLastError = true)] private static extern nint GetDC(nint window);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(nint window, nint dc);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern bool BitBlt(nint dest, int x, int y,
+        int width, int height, nint source, int sourceX, int sourceY, uint operation);
 }
