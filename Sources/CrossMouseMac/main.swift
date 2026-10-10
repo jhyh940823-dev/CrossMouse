@@ -96,8 +96,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var verifiedDVI = UserDefaults.standard.bool(forKey: "CrossMouse.ddcVerifiedDVI")
     private var autoInputSwitch = UserDefaults.standard.bool(forKey: "CrossMouse.autoInputSwitch")
     private var monitorStatus = "DDC 입력 전환은 확인 후에만 활성화할 수 있습니다."
-    private var autoEnteredFromPhilips = false
-    private var automaticEntry = MonitorHandoffGate()
+    private var automaticHandoff = AutomaticHandoff()
+    private var peerCapability: String?
+    private var peerVersion = "확인되지 않음"
     private var launchedInBackground = false
 
     init(options: Options) {
@@ -134,6 +135,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.connected = value
+                    self.peerCapability = nil
                     self.receiverLiveness.reset()
                     self.receiverResponsive = false
                     if !value {
@@ -145,9 +147,15 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 }
             },
             onMessage: { [weak self] message in
+                if message.transferId != nil {
+                    DispatchQueue.main.async { self?.receiveAutomaticMessage(message) }
+                    return
+                }
                 if message.type == "pong" {
                     DispatchQueue.main.async {
                         guard let self, self.connected, self.connectionWanted else { return }
+                        self.peerCapability = message.capability
+                        self.peerVersion = message.version ?? "이전 수신기"
                         self.receiverLiveness.confirm(
                             at: ProcessInfo.processInfo.systemUptime
                         )
@@ -159,14 +167,14 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 } else if message.type == "entered" {
                     DispatchQueue.main.async {
                         guard let self, self.remoteActive,
-                              self.awaitingEnterAt != nil else { return }
+                              !self.automaticHandoff.inProgress, self.awaitingEnterAt != nil else { return }
                         self.awaitingEnterAt = nil
                         self.lastTransfer = "Windows confirmed remote control"
                         self.updateMenu()
                     }
                 } else if message.type == "rejected" {
                     DispatchQueue.main.async {
-                        guard let self else { return }
+                        guard let self, !self.automaticHandoff.inProgress else { return }
                         self.reclaimMac()
                         self.windowsReady = false
                         self.lastTransfer = "Windows rejected mouse control"
@@ -175,28 +183,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     }
                 } else if message.type == "leave" {
                     DispatchQueue.main.async {
-                        guard let self else { return }
+                        // Unidentified/legacy replies have no authority over
+                        // an automatic monitor transaction.
+                        guard let self, !self.automaticHandoff.inProgress else { return }
                         self.lastTransfer = "Windows requested return to Mac"
                         self.reclaimMac()
-                        if self.autoEnteredFromPhilips, self.autoInputSwitch,
-                           self.verifiedDVI {
-                            self.autoEnteredFromPhilips = false
-                            self.ddcBusy = true
-                            self.monitorStatus = "필립스 DVI 자동 복귀 명령 전송 중…"
-                            self.monitorDDC.send(.dvi) { [weak self] result in
-                                guard let self else { return }
-                                self.ddcBusy = false
-                                switch result {
-                                case .success:
-                                    self.setWindowsMode(false)
-                                    self.monitorStatus = "DVI 복귀 명령 전송됨. 화면이 안 바뀌면 필립스 입력 버튼을 사용하세요."
-                                case .failure(let error):
-                                    self.setAutoInputSwitch(false)
-                                    self.monitorStatus = "자동 DVI 복귀 실패: \(error.localizedDescription). 모니터 입력 버튼으로 복구하세요."
-                                }
-                                self.updateMenu()
-                            }
-                        }
                         self.updateMenu()
                     }
                 }
@@ -359,7 +350,6 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             // if the handoff recently returned to Mac by moving left.
             network?.send(CrossMouseMessage(type: "leave"))
             reclaimMac()
-            autoEnteredFromPhilips = false
         }
         windowsReady = enable
         updateMenu()
@@ -377,6 +367,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             // Even if TCP is half-open or the Windows process stopped
             // consuming events, the Mac MUST release its local cursor.
             // Disarm automatic re-entry until the user deliberately retries.
+            cancelAutomaticEntry()
             network.send(CrossMouseMessage(type: "leave"))
             reclaimMac()
             windowsReady = false
@@ -412,7 +403,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func testMonitorInput(_ target: MacDDCInput.Input) {
-        guard !ddcBusy else { return }
+        guard !ddcBusy, !automaticHandoff.inProgress else { return }
         controlWindow.show()
         let alert = NSAlert()
         alert.messageText = target == .hdmi ? "필립스 HDMI 전환을 시험할까요?" : "필립스 DVI 복귀를 시험할까요?"
@@ -461,31 +452,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func tickHotCorner() {
-        if automaticEntry.isPending {
-            guard connectionWanted, connected, receiverResponsive,
-                  autoInputSwitch, verifiedHDMI, verifiedDVI, eventTap != nil else {
+        if automaticHandoff.inProgress {
+            if automaticHandoff.expired(at: ProcessInfo.processInfo.systemUptime) {
                 cancelAutomaticEntry()
-                monitorStatus = "입력 전환 대기를 취소했습니다. Mac 제어를 유지합니다."
+                monitorStatus = "전환 확인 응답이 오지 않았습니다. 입력은 Mac에 있습니다."
                 updateMenu()
-                return
             }
-            switch automaticEntry.poll(at: ProcessInfo.processInfo.systemUptime) {
-            case .waiting:
-                return
-            case .timedOut:
-                ddcBusy = false
-                monitorStatus = "화면 변경이 안정되지 않아 커서를 Mac에 유지했습니다. 모니터 입력을 확인하세요."
-                updateMenu()
-                return
-            case .ready:
-                ddcBusy = false
-                setWindowsMode(true)
-                autoEnteredFromPhilips = true
-                monitorStatus = "HDMI 전환 대기 완료 · Windows 화면 중앙으로 커서를 이동합니다."
-                enterWindowsAfterHotCorner()
-                updateMenu()
-                return
-            }
+            return
         }
         guard connectionWanted, connected, receiverResponsive, !windowsReady, !remoteActive,
               autoInputSwitch, verifiedHDMI, verifiedDVI, !ddcBusy, eventTap != nil,
@@ -516,68 +489,105 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             hotCornerHUD.show(on: philips, progress: fraction)
         case .triggered:
             hotCornerHUD.hide()
-            let token = automaticEntry.begin()
-            ddcBusy = true
-            monitorStatus = "필립스 HDMI 자동 전환 명령 실행 중…"
-            // Keep a visible, locally usable pointer on Samsung during the
-            // monitor's blank/switch interval. No input is captured yet.
-            CGWarpMouseCursorPosition(CGPoint(x: displayBounds.midX, y: displayBounds.midY))
-            updateMenu()
-            monitorDDC.send(.hdmi) { [weak self] result in
-                guard let self else { return }
-                guard self.automaticEntry.accepts(token) else {
-                    self.ddcBusy = false
-                    self.updateMenu()
-                    return
-                }
-                switch result {
-                case .success:
-                    guard self.connected, self.connectionWanted, self.receiverResponsive else {
-                        self.automaticEntry.cancel()
-                        self.ddcBusy = false
-                        self.monitorStatus = "모니터 명령을 보냈으나 Windows 연결이 끊겼습니다."
-                        self.updateMenu()
-                        return
-                    }
-                    self.automaticEntry.commandCompleted(token, at: ProcessInfo.processInfo.systemUptime)
-                    self.monitorStatus = "HDMI 명령 전송됨 · 화면 전환이 안정되기를 기다리는 중…"
-                case .failure(let error):
-                    self.ddcBusy = false
-                    // Avoid further surprising triggers when the monitor
-                    // failed a DDC request.
-                    self.setAutoInputSwitch(false)
-                    self.monitorStatus = "HDMI 전환 실패: \(error.localizedDescription)"
-                }
-                self.updateMenu()
+            guard peerCapability == "handoff-2" else {
+                monitorStatus = "Windows \(peerVersion): 화면·커서 준비 확인 기능이 없습니다. 수동 공유는 그대로 사용할 수 있습니다."
+                updateMenu()
+                return
             }
+            guard let id = automaticHandoff.begin(now: ProcessInfo.processInfo.systemUptime) else { return }
+            monitorStatus = "Windows의 대상 화면과 입력 준비를 확인하는 중…"
+            traceTransfer("prepare", id: id)
+            network.send(CrossMouseMessage(type: "prepare", transferId: id))
+            updateMenu()
         }
     }
 
     private func cancelAutomaticEntry() {
-        // A completed DDC command has no remaining process to wait for. An
-        // in-flight command owns ddcBusy until its callback returns, even if
-        // the user's newer mode selection invalidates this entry request.
-        if automaticEntry.isSettling { ddcBusy = false }
-        automaticEntry.cancel()
+        if let id = automaticHandoff.cancel() {
+            traceTransfer("cancel", id: id)
+            network?.send(CrossMouseMessage(type: "leave", transferId: id, reason: "cancel"))
+            reclaimMac()
+        }
     }
 
-    private func enterWindowsAfterHotCorner() {
-        guard !remoteActive, connected, receiverResponsive, windowsReady else { return }
-        let anchor = CGPoint(
-            x: displayBounds.maxX - 5,
-            y: displayBounds.midY
-        )
-        guard CGWarpMouseCursorPosition(anchor) == .success else {
-            monitorStatus = "Windows는 선택했지만 Mac 커서 고정에 실패했습니다."
+    private func receiveAutomaticMessage(_ message: CrossMouseMessage) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let id = message.transferId, id == automaticHandoff.id else {
+            traceTransfer("ignored-stale-\(message.type)", id: message.transferId)
             return
         }
-        remoteCursorAnchor = anchor
-        remoteActive = true
-        awaitingEnterAt = ProcessInfo.processInfo.systemUptime
-        transferAttempts += 1
-        lastTransfer = "Entered Windows via Philips hot corner"
-        network.send(CrossMouseMessage(type: "enter", fractionY: 0.5, centerCursor: true))
+        traceTransfer("receive-\(message.type)", id: id, reason: message.reason)
+        switch message.type {
+        case "prepared":
+            guard automaticHandoff.prepared(id, now: now), connected, connectionWanted else { return }
+            ddcBusy = true
+            CGWarpMouseCursorPosition(CGPoint(x: displayBounds.midX, y: displayBounds.midY))
+            monitorStatus = "Windows 준비 확인됨 · 필립스 HDMI 전환 중…"
+            monitorDDC.send(.hdmi) { [weak self] result in
+                guard let self else { return }
+                self.ddcBusy = false
+                guard self.automaticHandoff.id == id else { return }
+                switch result {
+                case .success:
+                    guard self.automaticHandoff.switched(id, now: ProcessInfo.processInfo.systemUptime) else { return }
+                    self.traceTransfer("HDMI-command-completed", id: id)
+                    self.monitorStatus = "Windows 화면과 커서 표시 확인 중 · 입력은 아직 Mac에 있습니다."
+                    self.network.send(CrossMouseMessage(type: "enter", fractionY: 0.5,
+                        centerCursor: true, transferId: id))
+                case .failure(let error):
+                    self.cancelAutomaticEntry()
+                    self.monitorStatus = "HDMI 명령 실패: \(error.localizedDescription)"
+                }
+                self.updateMenu()
+            }
+        case "entered":
+            guard automaticHandoff.acquired(id, visible: message.pointerVisible == true, now: now) else { return }
+            let anchor = CGPoint(x: displayBounds.maxX - 5, y: displayBounds.midY)
+            guard CGWarpMouseCursorPosition(anchor) == .success else {
+                cancelAutomaticEntry(); monitorStatus = "Mac 커서 제어를 확보하지 못했습니다."; updateMenu(); return
+            }
+            remoteCursorAnchor = anchor
+            windowsReady = true
+            remoteActive = true
+            awaitingEnterAt = nil
+            transferAttempts += 1
+            lastTransfer = "Windows ownership and cursor presentation confirmed"
+            monitorStatus = "Windows 제어 중 · \(message.reason ?? "준비 확인됨")"
+            traceTransfer("ownership-committed", id: id)
+        case "leave":
+            guard automaticHandoff.returning(id, reason: message.reason, now: now) else { return }
+            reclaimMac()
+            ddcBusy = true
+            monitorStatus = "현재 Windows 세션의 복귀 요청 확인 · DVI 전환 중…"
+            monitorDDC.send(.dvi) { [weak self] result in
+                guard let self else { return }
+                self.ddcBusy = false
+                guard self.automaticHandoff.returned(id) else { return }
+                self.windowsReady = false
+                self.traceTransfer("DVI-command-completed", id: id)
+                switch result {
+                case .success: self.monitorStatus = "Mac으로 복귀했습니다."
+                case .failure(let error): self.monitorStatus = "Mac 입력 복귀됨 · DVI 명령 실패: \(error.localizedDescription)"
+                }
+                self.updateMenu()
+            }
+        case "rejected":
+            cancelAutomaticEntry()
+            monitorStatus = "Windows가 입력을 받지 않았습니다: \(message.reason ?? "사유 없음")"
+        default: break
+        }
         updateMenu()
+    }
+
+    private func traceTransfer(_ event: String, id: String?, reason: String? = nil) {
+        // Causality only: never keys, clipboard, pairing secrets or user motion.
+        NSLog("CrossMouse handoff id=%@ event=%@ reason=%@", id ?? "none", event, reason ?? "none")
+    }
+
+    private func sendInput(_ message: CrossMouseMessage) {
+        var input = message
+        if automaticHandoff.ownsInput { input.transferId = automaticHandoff.id }
+        network.send(input)
     }
 
     @objc private func toggleConnection() {
@@ -663,7 +673,6 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             displayID = CGMainDisplayID()
         }
         displayBounds = CGDisplayBounds(displayID)
-        automaticEntry.displayChanged(at: ProcessInfo.processInfo.systemUptime)
         let next = CursorAnchorGeometry(displayID: displayID, bounds: displayBounds)
         // HDMI/DVI notifications about Philips are expected. Only reclaim
         // if Samsung (where the Mac cursor is actually parked) changed.
@@ -750,6 +759,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         guard connectionWanted, connected, receiverResponsive, windowsReady else {
             return Unmanaged.passUnretained(event)
         }
+        if automaticHandoff.inProgress && !automaticHandoff.ownsInput {
+            return Unmanaged.passUnretained(event)
+        }
         if !remoteActive {
             // Only enter on an unpressed mouse move, not while dragging a file.
             if type == .mouseMoved,
@@ -789,7 +801,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             let dx = Int(event.getIntegerValueField(.mouseEventDeltaX))
             let dy = Int(event.getIntegerValueField(.mouseEventDeltaY))
             if dx != 0 || dy != 0 {
-                network.send(CrossMouseMessage(type: "move", dx: dx, dy: dy))
+                sendInput(CrossMouseMessage(type: "move", dx: dx, dy: dy))
             }
             // Returning nil prevents local app delivery, but not all pointer
             // motion at the session tap. Reposition after each captured delta.
@@ -807,20 +819,20 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             else if type == .rightMouseDown || type == .rightMouseUp { button = 1 }
             else { button = Int(event.getIntegerValueField(.mouseEventButtonNumber)) }
             let down = type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown
-            network.send(CrossMouseMessage(type: "button", button: button, down: down))
+            sendInput(CrossMouseMessage(type: "button", button: button, down: down))
         case .scrollWheel:
             let v = Int(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
             let h = Int(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
             if v != 0 || h != 0 {
-                network.send(CrossMouseMessage(type: "wheel", vertical: v, horizontal: h))
+                sendInput(CrossMouseMessage(type: "wheel", vertical: v, horizontal: h))
             }
         case .keyDown, .keyUp:
-            network.send(CrossMouseMessage(type: "key", down: type == .keyDown, code: keyCode))
+            sendInput(CrossMouseMessage(type: "key", down: type == .keyDown, code: keyCode))
         case .flagsChanged:
             let down = !pressedModifiers.contains(keyCode)
             if down { pressedModifiers.insert(keyCode) }
             else { pressedModifiers.remove(keyCode) }
-            network.send(CrossMouseMessage(type: "key", down: down, code: keyCode))
+            sendInput(CrossMouseMessage(type: "key", down: down, code: keyCode))
         default:
             break
         }

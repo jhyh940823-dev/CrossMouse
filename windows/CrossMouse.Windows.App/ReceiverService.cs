@@ -23,6 +23,13 @@ internal sealed class ReceiverService : IAsyncDisposable
     private SecureChannel? _activeChannel;
     private CancellationTokenSource? _cancel;
     private Task? _loop;
+    private const string HandoffCapability = "handoff-2";
+    private readonly object _handoff = new();
+    private string? _preparedId, _activeId;
+    private TargetDisplay? _target;
+    private CancellationTokenSource? _activationCancel;
+    private Task? _activation;
+    private PointerPresenter? _presenter;
 
     public event Action<ReceiverState, string>? StatusChanged;
 
@@ -52,15 +59,23 @@ internal sealed class ReceiverService : IAsyncDisposable
     /// </summary>
     public async Task ReturnCursorToMacAsync()
     {
-        if (!_injector.IsRemotelyActive) return;
-        _injector.ReleaseAll();
-        var channel = Volatile.Read(ref _activeChannel);
+        string? id;
+        SecureChannel? channel;
+        lock (_handoff)
+        {
+            if (!_injector.IsRemotelyActive) return;
+            id = _activeId;
+            _activeId = _preparedId = null;
+            _activationCancel?.Cancel();
+            _injector.ReleaseAll();
+            channel = Volatile.Read(ref _activeChannel);
+        }
         if (channel is null) return;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         try
         {
             await channel.SendAsync(
-                new MouseMessage { Type = "leave" }, timeout.Token
+                new MouseMessage { Type = "leave", TransferId = id, Reason = "window-close" }, timeout.Token
             ).ConfigureAwait(false);
         }
         catch (Exception error) when (
@@ -149,12 +164,42 @@ internal sealed class ReceiverService : IAsyncDisposable
                             if (message.Type == "ping")
                             {
                                 await channel.SendAsync(
-                                    new MouseMessage { Type = "pong" },
+                                    new MouseMessage { Type = "pong", Capability = HandoffCapability,
+                                        Version = typeof(ReceiverService).Assembly.GetName().Version?.ToString(3) },
                                     sessionCancel.Token
                                 ).ConfigureAwait(false);
                                 continue;
                             }
-                            _injector.Apply(message);
+                            if (message.Type == "prepare" && message.TransferId is { Length: > 0 and <= 64 })
+                            {
+                                StartPreparation(message.TransferId, channel, sessionCancel.Token);
+                                continue;
+                            }
+                            if (message.Type == "enter" && message.TransferId is not null)
+                            {
+                                StartAcquisition(message, channel, sessionCancel.Token);
+                                continue;
+                            }
+                            lock (_handoff)
+                            {
+                                // Never replay input from a cancelled/previous ownership epoch.
+                                if (_preparedId is not null && _activeId is null)
+                                {
+                                    if (message.Type == "leave" && message.TransferId == _preparedId)
+                                    { _preparedId = null; _activationCancel?.Cancel(); }
+                                    continue;
+                                }
+                                if (message.TransferId != _activeId)
+                                {
+                                    if (message.Type == "leave" && message.TransferId == _preparedId)
+                                    { _preparedId = null; _activationCancel?.Cancel(); }
+                                    continue;
+                                }
+                                if (message.Type == "leave")
+                                { _activeId = _preparedId = null; _activationCancel?.Cancel(); }
+                                if (message.Type == "enter") _injector.SelectTarget(null); // legacy manual entry
+                                _injector.Apply(message);
+                            }
                             if (message.Type == "enter")
                             {
                                 // Mac must never remain parked waiting for a
@@ -170,6 +215,14 @@ internal sealed class ReceiverService : IAsyncDisposable
                     finally
                     {
                         sessionCancel.Cancel();
+                        Task? activation;
+                        lock (_handoff)
+                        {
+                            _activeId = _preparedId = null;
+                            _activationCancel?.Cancel(); activation = _activation;
+                        }
+                        if (activation is not null)
+                        { try { await activation.ConfigureAwait(false); } catch (OperationCanceledException) { } }
                         Volatile.Write(ref _activeChannel, null);
                         try { await returnPoll.ConfigureAwait(false); }
                         catch (OperationCanceledException) { }
@@ -230,8 +283,15 @@ internal sealed class ReceiverService : IAsyncDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(8, cancellationToken).ConfigureAwait(false);
-            if (_injector.ReachedLeftEdge())
-                await channel.SendAsync(new MouseMessage { Type = "leave" }, cancellationToken).ConfigureAwait(false);
+            string? id;
+            lock (_handoff)
+            {
+                if (!_injector.ReachedLeftEdge()) continue;
+                id = _activeId; _activeId = _preparedId = null;
+                _activationCancel?.Cancel();
+            }
+            await channel.SendAsync(new MouseMessage { Type = "leave", TransferId = id,
+                Reason = "left-edge" }, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -267,6 +327,121 @@ internal sealed class ReceiverService : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync().ConfigureAwait(false);
+        _activationCancel?.Dispose();
+        _presenter?.Dispose();
+    }
+
+    private void StartPreparation(string id, SecureChannel channel, CancellationToken session)
+    {
+        lock (_handoff)
+        {
+            if (_activeId is not null || _preparedId is not null || _injector.IsRemotelyActive) return;
+            _activationCancel?.Cancel();
+            _activationCancel?.Dispose();
+            _activationCancel = CancellationTokenSource.CreateLinkedTokenSource(session);
+            _activationCancel.CancelAfter(TimeSpan.FromSeconds(30)); // abandoned preparation lease, not a video delay
+            _preparedId = id;
+            _target = null;
+            CancellationToken token = _activationCancel.Token;
+            _activation = Task.Run(async () =>
+            {
+                try
+                {
+                    var target = TargetDisplay.Resolve();
+                    // Wake the pointer/display BEFORE Mac changes the video input.
+                    // Do not acquire keyboard/mouse ownership at this stage.
+                    if (!Native.WakePointerAt(target.Bounds.Left + target.Bounds.Width / 2,
+                        target.Bounds.Top + target.Bounds.Height / 2)) throw new IOException("pointer-wake-failed");
+                    lock (_handoff)
+                    {
+                        if (_preparedId != id || token.IsCancellationRequested) return;
+                        _target = target;
+                    }
+                    await channel.SendAsync(new MouseMessage { Type = "prepared", TransferId = id,
+                        Capability = HandoffCapability, Reason = target.Name }, token).ConfigureAwait(false);
+                    // Expire an abandoned prepare without acquiring input.
+                    // The check includes the exact owner ID so this old lease
+                    // cannot cancel a later transfer in the same connection.
+                    _ = Task.Run(async () =>
+                    {
+                        try { await Task.Delay(Timeout.InfiniteTimeSpan, token).ConfigureAwait(false); }
+                        catch (OperationCanceledException)
+                        {
+                            lock (_handoff)
+                            {
+                                if (_preparedId == id && _activeId is null) _preparedId = null;
+                            }
+                        }
+                    });
+                }
+                catch (Exception error) { await RejectAsync(id, channel, error, session).ConfigureAwait(false); }
+            });
+        }
+    }
+
+    private void StartAcquisition(MouseMessage request, SecureChannel channel, CancellationToken session)
+    {
+        lock (_handoff)
+        {
+            if (_preparedId != request.TransferId || _target is null || _activeId is not null) return;
+            var target = _target;
+            string id = request.TransferId!;
+            _activationCancel!.CancelAfter(TimeSpan.FromSeconds(7));
+            var token = _activationCancel!.Token;
+            _activation = Task.Run(async () =>
+            {
+                try
+                {
+                    uint? source;
+                    // Observe the monitor's actual input when it supports VCP reads.
+                    // Unsupported is reported, not silently treated as verified HDMI.
+                    while ((source = target.InputSource()) is uint input && input != 17)
+                        await Task.Delay(100, token).ConfigureAwait(false);
+                    lock (_handoff)
+                    {
+                        if (_preparedId != id || token.IsCancellationRequested) return;
+                        _injector.SelectTarget(target.Bounds);
+                        _injector.Apply(request);
+                        if (!_injector.IsRemotelyActive) throw new IOException("pointer-injection-rejected");
+                        _activeId = id;
+                        _presenter ??= new PointerPresenter(() => _injector.IsActiveForPresentation);
+                    }
+                    if (!await _presenter.VerifyAsync(token).ConfigureAwait(false))
+                        throw new IOException("pointer-not-presented");
+                    if (!Native.GetCursorPos(out var pointer) || pointer.X < target.Bounds.Left ||
+                        pointer.X >= target.Bounds.Right || pointer.Y < target.Bounds.Top || pointer.Y >= target.Bounds.Bottom)
+                        throw new IOException("pointer-outside-target-display");
+                    lock (_handoff)
+                    {
+                        if (_activeId != id || token.IsCancellationRequested) return;
+                        _preparedId = null;
+                        _activationCancel.CancelAfter(Timeout.InfiniteTimeSpan);
+                    }
+                    await channel.SendAsync(new MouseMessage { Type = "entered", TransferId = id,
+                        PointerVisible = true, Reason = source.HasValue ? "hdmi-observed" : "input-read-unavailable" },
+                        token).ConfigureAwait(false);
+                }
+                catch (Exception error) { await RejectAsync(id, channel, error, session).ConfigureAwait(false); }
+            });
+        }
+    }
+
+    private async Task RejectAsync(string id, SecureChannel channel, Exception error, CancellationToken session)
+    {
+        lock (_handoff)
+        {
+            if (_preparedId != id && _activeId != id) return;
+            _preparedId = _activeId = null;
+            _activationCancel?.Cancel();
+            _injector.ReleaseAll();
+        }
+        if (session.IsCancellationRequested) return;
+        try
+        {
+            await channel.SendAsync(new MouseMessage { Type = "rejected", TransferId = id,
+                Reason = error is OperationCanceledException ? "preparation-timeout" : error.Message }, session).ConfigureAwait(false);
+        }
+        catch (Exception sendError) when (sendError is IOException or OperationCanceledException or ObjectDisposedException) { }
     }
 }
 

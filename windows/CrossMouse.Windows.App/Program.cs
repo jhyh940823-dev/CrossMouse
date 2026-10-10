@@ -30,6 +30,7 @@ internal static class Program
             }
         }
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--handoff-regression-test")) return HandoffRegression.Run();
         if (args.Contains("--automatic-entry-test"))
             return AutomaticEntryRegression.Run();
         if (args.Contains("--startup-self-test"))

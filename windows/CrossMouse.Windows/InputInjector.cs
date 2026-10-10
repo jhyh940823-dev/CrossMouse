@@ -21,6 +21,10 @@ internal sealed class InputInjector
     private long _lastMovementTimestamp;
     private bool _remoteActive;
     private bool _leftReturnPending;
+    private Native.DesktopRectangle? _targetDisplay;
+    public bool IsActiveForPresentation => Volatile.Read(ref _remoteActive);
+    public void SelectTarget(Native.DesktopRectangle? display) { lock (_sync) _targetDisplay = display; }
+    private Native.DesktopRectangle Desktop() => _targetDisplay ?? Native.Desktop();
 
     internal readonly record struct MotionGapStats(
         int MovePackets, int GapsOver25Ms, int MaxGapMs);
@@ -92,7 +96,7 @@ internal sealed class InputInjector
                 _motion.Reset();
                 _leftReturnPending = false;
                 _lastMovementTimestamp = 0;
-                var desktop = Native.Desktop();
+                var desktop = Desktop();
                 var fraction = Math.Clamp(message.FractionY ?? 0.5, 0.0, 1.0);
                 int insetY = Math.Min(24, Math.Max(0, (desktop.Height - 1) / 2));
                 int x = message.CenterCursor == true
@@ -166,7 +170,7 @@ internal sealed class InputInjector
             // Only a successfully applied negative-X remote move can arm this.
             if (!_remoteActive || !_leftReturnPending || !Native.GetCursorPos(out var point))
                 return false;
-            if (point.X > Native.Desktop().Left + 2)
+            if (point.X > Desktop().Left + 2)
             {
                 _leftReturnPending = false;
                 return false;
@@ -218,7 +222,7 @@ internal sealed class InputInjector
     private void MoveCore(int dx, int dy)
     {
         if ((dx == 0 && dy == 0) || !Native.GetCursorPos(out var cursor)) return;
-        var desktop = Native.Desktop();
+        var desktop = Desktop();
         long x = Math.Clamp((long)cursor.X + dx, desktop.Left, (long)desktop.Right - 1);
         long y = Math.Clamp((long)cursor.Y + dy, desktop.Top, (long)desktop.Bottom - 1);
         if (!Native.SetCursorPos((int)x, (int)y)) return;

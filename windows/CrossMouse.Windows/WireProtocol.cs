@@ -20,6 +20,11 @@ internal sealed class MouseMessage
     // Automatic HDMI handoff has no meaningful left-edge entry position.
     // Place the cursor visibly inside the screen instead of the hot corner.
     public bool? CenterCursor { get; set; }
+    public string? TransferId { get; set; }
+    public string? Reason { get; set; }
+    public string? Capability { get; set; }
+    public string? Version { get; set; }
+    public bool? PointerVisible { get; set; }
 }
 
 internal static class WireProtocol

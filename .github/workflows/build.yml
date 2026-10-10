@@ -58,6 +58,9 @@ jobs:
         if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
         timeout-minutes: 2
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --automatic-entry-test
+      - name: Correlated ownership, stale replies, target and headless pointer presentation
+        timeout-minutes: 2
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --handoff-regression-test
       - name: Publish Windows standalone receiver
         run: dotnet publish windows/CrossMouse.Windows -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/windows
       - uses: actions/upload-artifact@v4

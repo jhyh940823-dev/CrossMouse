@@ -22,6 +22,7 @@ final class MacConnection: @unchecked Sendable {
     private var moveTimer: DispatchSourceTimer?
     private var pendingMoveX = 0
     private var pendingMoveY = 0
+    private var pendingTransferId: String?
 
     init(
         host: String,
@@ -69,6 +70,8 @@ final class MacConnection: @unchecked Sendable {
             guard !self.stopped else { return }
             guard self.sessionKey != nil else { return }
             if message.type == "move" {
+                if self.pendingTransferId != message.transferId { self.flushMotion() }
+                self.pendingTransferId = message.transferId
                 self.pendingMoveX = max(-32768, min(32768, self.pendingMoveX + (message.dx ?? 0)))
                 self.pendingMoveY = max(-32768, min(32768, self.pendingMoveY + (message.dy ?? 0)))
             } else {
@@ -83,9 +86,11 @@ final class MacConnection: @unchecked Sendable {
         guard pendingMoveX != 0 || pendingMoveY != 0 else { return }
         let dx = pendingMoveX
         let dy = pendingMoveY
+        let id = pendingTransferId
         pendingMoveX = 0
         pendingMoveY = 0
-        sendFrame(CrossMouseMessage(type: "move", dx: dx, dy: dy))
+        pendingTransferId = nil
+        sendFrame(CrossMouseMessage(type: "move", dx: dx, dy: dy, transferId: id))
     }
 
     private func sendFrame(_ message: CrossMouseMessage) {
@@ -115,6 +120,7 @@ final class MacConnection: @unchecked Sendable {
         receiveSequence = 0
         pendingMoveX = 0
         pendingMoveY = 0
+        pendingTransferId = nil
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let socket = NWConnection(
@@ -208,6 +214,7 @@ final class MacConnection: @unchecked Sendable {
         buffer = FramedByteBuffer()
         pendingMoveX = 0
         pendingMoveY = 0
+        pendingTransferId = nil
         if wasConnected { onConnected(false) }
         guard !stopped else { return }
         queue.asyncAfter(deadline: .now() + .seconds(2)) { [weak self] in

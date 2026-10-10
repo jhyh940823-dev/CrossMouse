@@ -218,7 +218,7 @@ internal static class RemoteInputRegression
         throw new Exception("Native X hit target (HTCLOSE) unavailable; not silently skipping.");
     }
 
-    private sealed class Peer : IDisposable
+    internal sealed class Peer : IDisposable
     {
         private readonly TcpClient _client;
         private readonly byte[] _sessionKey;
@@ -254,6 +254,12 @@ internal static class RemoteInputRegression
 
         internal async Task ExpectAsync(string type, CancellationToken token)
         {
+            var reply = await ReadAsync(token).ConfigureAwait(false);
+            if (reply.Type != type) throw new Exception($"Expected {type}, received {reply.Type}.");
+        }
+
+        internal async Task<MouseMessage> ReadAsync(CancellationToken token)
+        {
             var stream = _client.GetStream();
             var header = new byte[4];
             await stream.ReadExactlyAsync(header, token).ConfigureAwait(false);
@@ -261,8 +267,7 @@ internal static class RemoteInputRegression
             if (length < 16 || length > WireProtocol.MaxFrameLength) throw new Exception("Invalid frame length.");
             var payload = new byte[length];
             await stream.ReadExactlyAsync(payload, token).ConfigureAwait(false);
-            var reply = WireProtocol.Decrypt(payload, _sessionKey, _receiveSequence++, fromMac: false);
-            if (reply.Type != type) throw new Exception($"Expected {type}, received {reply.Type}.");
+            return WireProtocol.Decrypt(payload, _sessionKey, _receiveSequence++, fromMac: false);
         }
 
         public void Dispose() => _client.Dispose();

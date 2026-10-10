@@ -12,3 +12,4 @@
 *.secret
 CrossMouse.app/
 dist/
+diagnostics/
