@@ -71,6 +71,9 @@ internal static class AutomaticEntryRegression
         {
             injector.Apply(new MouseMessage { Type = "enter", FractionY = 0 });
             if (!injector.IsRemotelyActive) throw new Exception("Entry failed.");
+            // The relocation models a display change AFTER entry, not a race
+            // between this test's SetCursorPos and a queued entry mouse event.
+            Thread.Sleep(100);
             var desktop = Native.Desktop();
             if (!Native.SetCursorPos(desktop.Left, desktop.Top + desktop.Height / 2))
                 throw new Exception("Could not simulate desktop cursor relocation.");
