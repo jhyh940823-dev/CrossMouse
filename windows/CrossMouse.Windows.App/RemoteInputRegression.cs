@@ -46,7 +46,15 @@ internal static class RemoteInputRegression
                     probe = new CaptionProbe(window.Handle);
                     for (int attempt = 1; attempt <= 2; attempt++)
                     {
-                        if (attempt > 1) window.RestoreForTest();
+                        if (attempt > 1)
+                        {
+                            window.RestoreForTest();
+                            // This case is a second ordinary X click, not a
+                            // native double-click on the same caption pixels.
+                            // Honor Windows' interval instead of generating
+                            // WM_NCLBUTTONDBLCLK during a rapid test replay.
+                            await Task.Delay(checked((int)GetDoubleClickTime()) + 100, timeout.Token);
+                        }
                         window.Activate();
                         Point closePoint = FindNativeCloseButton(window.Handle);
                         CaptionProbe activeProbe = probe;
@@ -188,6 +196,9 @@ internal static class RemoteInputRegression
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(nint window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDoubleClickTime();
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern nint SendMessageW(nint window, uint message, nuint wParam, nint lParam);
