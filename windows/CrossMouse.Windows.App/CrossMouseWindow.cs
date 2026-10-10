@@ -18,6 +18,14 @@ internal sealed class CrossMouseWindow : Form
     private readonly Button _start = NewButton("연결 시작");
     private readonly Button _stop = NewButton("연결 중지");
     private readonly Button _exit = NewButton("앱 종료");
+    private readonly CheckBox _smoothing = new()
+    {
+        Text = "부드러운 마우스 이동 (기본 사용)",
+        Checked = true,
+        AutoSize = true
+    };
+    private readonly Label _motionStats = NewLabel("마우스를 움직이면 수신 간격을 표시합니다.", 9);
+    private readonly System.Windows.Forms.Timer _statsTimer = new() { Interval = 2000 };
     private readonly NotifyIcon _tray;
     private ReceiverService? _receiver;
     private readonly string _keyPath;
@@ -27,9 +35,9 @@ internal sealed class CrossMouseWindow : Form
     public CrossMouseWindow()
     {
         Text = "CrossMouse - Windows";
-        ClientSize = new Size(540, 360);
-        MinimumSize = new Size(510, 385);
-        MaximumSize = new Size(770, 490);
+        ClientSize = new Size(540, 435);
+        MinimumSize = new Size(510, 450);
+        MaximumSize = new Size(770, 600);
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 10F);
         StartPosition = FormStartPosition.CenterScreen;
@@ -80,6 +88,12 @@ internal sealed class CrossMouseWindow : Form
         _start.Click += (_, _) => StartReceiver();
         _stop.Click += async (_, _) => await StopReceiverAsync();
         _exit.Click += (_, _) => Close();
+        _smoothing.CheckedChanged += (_, _) =>
+            _receiver?.SetSmoothingEnabled(_smoothing.Checked);
+        _motionStats.ForeColor = SystemColors.GrayText;
+        _motionStats.MaximumSize = new Size(490, 0);
+        _motionStats.AutoSize = true;
+        _statsTimer.Tick += (_, _) => UpdateMouseStats();
         _stop.Enabled = false;
         var copyKey = NewButton("페어링 키 복사");
         copyKey.Click += (_, _) => CopyPairingKey();
@@ -96,7 +110,8 @@ internal sealed class CrossMouseWindow : Form
         stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         foreach (Control control in new Control[]
         {
-            title, subtitle, address, _status, _detail, instruction, buttons, privacy
+            title, subtitle, address, _status, _detail, instruction,
+            _smoothing, _motionStats, buttons, privacy
         })
         {
             control.Margin = new Padding(0, 0, 0, 13);
@@ -122,13 +137,19 @@ internal sealed class CrossMouseWindow : Form
 
         // Keep one-click launch behavior. If the previous console receiver is
         // still running the UI shows a clear port-in-use error instead.
-        Shown += (_, _) => StartReceiver();
+        Shown += (_, _) =>
+        {
+            StartReceiver();
+            _statsTimer.Start();
+        };
         Resize += (_, _) =>
         {
             if (WindowState == FormWindowState.Minimized) Hide();
         };
         FormClosed += (_, _) =>
         {
+            _statsTimer.Stop();
+            _statsTimer.Dispose();
             _tray.Visible = false;
             _tray.Dispose();
             trayMenu.Dispose();
@@ -231,6 +252,16 @@ internal sealed class CrossMouseWindow : Form
         {
             _detail.Text = "클립보드가 다른 앱에서 사용 중입니다. 잠시 뒤 다시 시도하세요.";
         }
+    }
+
+    private void UpdateMouseStats()
+    {
+        if (_receiver is null) return;
+        var stats = _receiver.TakeMotionGapStats();
+        _motionStats.Text = stats.MovePackets == 0
+            ? "최근 2초: 마우스 입력 없음"
+            : $"최근 2초: 수신 {stats.MovePackets}회 · 25ms 넘는 간격 {stats.GapsOver25Ms}회" +
+              (stats.MaxGapMs > 0 ? $" · 최대 {stats.MaxGapMs}ms" : "");
     }
 
     private void UpdateStatus(ReceiverState state, string message)

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using CrossMouse.Windows;
 
 namespace CrossMouse.Windows.App;
@@ -16,7 +17,7 @@ internal sealed class ReceiverService : IAsyncDisposable
 {
     private readonly byte[] _key;
     private readonly int _port;
-    private readonly InputInjector _injector = new();
+    private readonly InputInjector _injector = new(smoothMotion: true);
     private TcpListener? _listener;
     private TcpClient? _activeClient;
     private CancellationTokenSource? _cancel;
@@ -34,6 +35,10 @@ internal sealed class ReceiverService : IAsyncDisposable
     public bool IsRunning => _listener is not null;
     public int ListeningPort =>
         (_listener?.LocalEndpoint as IPEndPoint)?.Port ?? 0;
+
+    public void SetSmoothingEnabled(bool enabled) => _injector.SetSmoothingEnabled(enabled);
+
+    public InputInjector.MotionGapStats TakeMotionGapStats() => _injector.TakeMotionGapStats();
 
     public void Start()
     {
@@ -89,6 +94,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                     using var sessionCancel =
                         CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     var returnPoll = CheckLeftBoundaryAsync(channel, sessionCancel.Token);
+                    var render = RenderMouseAsync(sessionCancel.Token);
                     try
                     {
                         while (!sessionCancel.IsCancellationRequested)
@@ -103,6 +109,8 @@ internal sealed class ReceiverService : IAsyncDisposable
                         try { await returnPoll; }
                         catch (OperationCanceledException) { }
                         catch (IOException) { }
+                        try { await render; }
+                        catch (OperationCanceledException) { }
                         _injector.ReleaseAll();
                     }
                 }
@@ -161,8 +169,60 @@ internal sealed class ReceiverService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Renders the cursor at ~125Hz instead of teleporting it whenever a TCP
+    /// message happens to arrive. High-resolution timer mode is requested only
+    /// while Windows actually has the input focus.
+    /// </summary>
+    private async Task RenderMouseAsync(CancellationToken cancellationToken)
+    {
+        HighResolutionTimer? resolution = null;
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(8));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                if (_injector.IsRemotelyActive)
+                    resolution ??= HighResolutionTimer.TryBegin();
+                else
+                {
+                    resolution?.Dispose();
+                    resolution = null;
+                }
+                _injector.Tick();
+            }
+        }
+        finally
+        {
+            resolution?.Dispose();
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
+    }
+}
+
+internal sealed class HighResolutionTimer : IDisposable
+{
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod", ExactSpelling = true)]
+    private static extern uint TimeBeginPeriod(uint period);
+
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod", ExactSpelling = true)]
+    private static extern uint TimeEndPeriod(uint period);
+
+    private readonly bool _active;
+
+    private HighResolutionTimer(bool active) { _active = active; }
+
+    internal static HighResolutionTimer TryBegin()
+    {
+        return new HighResolutionTimer(TimeBeginPeriod(1) == 0);
+    }
+
+    public void Dispose()
+    {
+        if (_active) _ = TimeEndPeriod(1);
     }
 }

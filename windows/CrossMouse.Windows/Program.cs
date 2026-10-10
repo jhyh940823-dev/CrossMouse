@@ -180,7 +180,47 @@ internal static class SelfTest
         Check(!rejected, "Reject incorrect pairing key");
         Check(KeyMapping.TryGet(55, out int control) && control == 0x1D, "Mac Cmd to Ctrl");
         Check(KeyMapping.TryGet(123, out int left) && left == 0x14B, "Extended left arrow");
+        TestMouseSmoothing();
         Console.WriteLine("PASS CrossMouse protocol self-tests");
+    }
+
+    private static void TestMouseSmoothing()
+    {
+        var motion = new MotionSmoother();
+        motion.Add(120, -75);
+        var first = motion.Step();
+        Check(first.Dx is > 0 and < 120 && first.Dy is < 0 and > -75,
+            "Batched movement is spread over render ticks");
+        int sumX = first.Dx, sumY = first.Dy;
+        for (int i = 0; i < 12 && motion.HasPending; i++)
+        {
+            var delta = motion.Step();
+            Check(delta.Dx >= 0 && delta.Dy <= 0, "No smoothing overshoot");
+            sumX += delta.Dx;
+            sumY += delta.Dy;
+        }
+        Check(!motion.HasPending && sumX == 120 && sumY == -75,
+            "Smoothed movement conserves precise total distance");
+
+        // A burst of mouse packets in one scheduling interval cannot become
+        // a single giant cursor jump. A click drains the remaining distance.
+        motion.Reset();
+        for (int i = 0; i < 10; i++) motion.Add(15, -2);
+        var burst = motion.Step();
+        Check(burst.Dx is > 0 and < 150, "Jitter burst is interpolated");
+        var rest = motion.Drain();
+        Check(burst.Dx + rest.Dx == 150 && burst.Dy + rest.Dy == -20,
+            "Click-time drain preserves movement ordering");
+        Check(!motion.HasPending, "Drain clears remaining movement");
+
+        motion.Add(200, 40);
+        motion.Reset();
+        Check(!motion.HasPending && motion.Step() == (0, 0),
+            "Leaving Windows discards pending motion");
+
+        motion.Add(800, 0);
+        for (int i = 0; i < 30 && motion.HasPending; i++) motion.Step();
+        Check(!motion.HasPending, "Large bursts settle within bounded ticks");
     }
 
     private static void Check(bool condition, string name)

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 
 namespace CrossMouse.Windows;
 
@@ -12,7 +13,73 @@ internal sealed class InputInjector
     private readonly object _sync = new();
     private readonly HashSet<int> _downKeys = [];
     private readonly HashSet<int> _downButtons = [];
+    private readonly MotionSmoother _motion = new();
+    private bool _smoothMotion;
+    private int _recentMovePackets;
+    private int _recentGapsOver25Ms;
+    private int _recentMaxGapMs;
+    private long _lastMovementTimestamp;
     private bool _remoteActive;
+
+    internal readonly record struct MotionGapStats(
+        int MovePackets, int GapsOver25Ms, int MaxGapMs);
+
+    public InputInjector(bool smoothMotion = false)
+    {
+        _smoothMotion = smoothMotion;
+    }
+
+    public bool IsRemotelyActive
+    {
+        get { lock (_sync) return _remoteActive; }
+    }
+
+    /// <summary>
+    /// Compare the smooth render path with the original immediate path.
+    /// Switching off drains outstanding motion before changing modes.
+    /// </summary>
+    public void SetSmoothingEnabled(bool enabled)
+    {
+        lock (_sync)
+        {
+            if (_smoothMotion && !enabled && _remoteActive)
+            {
+                var remaining = _motion.Drain();
+                MoveCore(remaining.Dx, remaining.Dy);
+            }
+            _motion.Reset();
+            _smoothMotion = enabled;
+        }
+    }
+
+    public MotionGapStats TakeMotionGapStats()
+    {
+        lock (_sync)
+        {
+            var stats = new MotionGapStats(
+                _recentMovePackets, _recentGapsOver25Ms, _recentMaxGapMs);
+            _recentMovePackets = 0;
+            _recentGapsOver25Ms = 0;
+            _recentMaxGapMs = 0;
+            _lastMovementTimestamp = 0;
+            return stats;
+        }
+    }
+
+    /// <summary>
+    /// Call on a background timer around every 8 ms while authenticated.
+    /// Rendering and input processing are locked together so click positions
+    /// always include all preceding mouse movement.
+    /// </summary>
+    public void Tick()
+    {
+        lock (_sync)
+        {
+            if (!_remoteActive || !_smoothMotion || !_motion.HasPending) return;
+            var step = _motion.Step();
+            MoveCore(step.Dx, step.Dy);
+        }
+    }
 
     public void Apply(MouseMessage message)
     {
@@ -21,6 +88,8 @@ internal sealed class InputInjector
             if (message.Type == "enter")
             {
                 ReleaseAllCore();
+                _motion.Reset();
+                _lastMovementTimestamp = 0;
                 var desktop = Native.Desktop();
                 var fraction = Math.Clamp(message.FractionY ?? 0.5, 0.0, 1.0);
                 int x = desktop.Left + Math.Min(64, Math.Max(8, desktop.Width / 8));
@@ -32,6 +101,7 @@ internal sealed class InputInjector
             if (message.Type == "leave")
             {
                 _remoteActive = false;
+                _motion.Reset();
                 ReleaseAllCore();
                 return;
             }
@@ -40,26 +110,23 @@ internal sealed class InputInjector
             switch (message.Type)
             {
                 case "move":
-                    if (Native.GetCursorPos(out var cursor))
-                    {
-                        var desktop = Native.Desktop();
-                        int dx = Math.Clamp(message.Dx ?? 0, -2048, 2048);
-                        int dy = Math.Clamp(message.Dy ?? 0, -2048, 2048);
-                        Native.SetCursorPos(
-                            Math.Clamp(cursor.X + dx, desktop.Left, desktop.Right - 1),
-                            Math.Clamp(cursor.Y + dy, desktop.Top, desktop.Bottom - 1)
-                        );
-                    }
+                    int dx = Math.Clamp(message.Dx ?? 0, -2048, 2048);
+                    int dy = Math.Clamp(message.Dy ?? 0, -2048, 2048);
+                    RecordMovementGap();
+                    if (_smoothMotion) _motion.Add(dx, dy);
+                    else MoveCore(dx, dy);
                     break;
                 case "button":
                     if (message.Button is int button && message.Down is bool down)
                     {
+                        FlushMovementCore();
                         if (down) _downButtons.Add(button);
                         else _downButtons.Remove(button);
                         Native.MouseButton(button, down);
                     }
                     break;
                 case "wheel":
+                    FlushMovementCore();
                     if (message.Vertical is int vertical && vertical != 0)
                         Native.Scroll(vertical, horizontal: false);
                     if (message.Horizontal is int horizontal && horizontal != 0)
@@ -69,6 +136,7 @@ internal sealed class InputInjector
                     if (message.Code is int key && message.Down is bool pressed &&
                         KeyMapping.TryGet(key, out int scanCode))
                     {
+                        FlushMovementCore();
                         if (pressed) _downKeys.Add(key);
                         else _downKeys.Remove(key);
                         Native.Key(scanCode, pressed);
@@ -95,8 +163,43 @@ internal sealed class InputInjector
         lock (_sync)
         {
             _remoteActive = false;
+            _motion.Reset();
             ReleaseAllCore();
         }
+    }
+
+    private void RecordMovementGap()
+    {
+        long now = Stopwatch.GetTimestamp();
+        if (_lastMovementTimestamp != 0)
+        {
+            double gap = Stopwatch.GetElapsedTime(_lastMovementTimestamp, now).TotalMilliseconds;
+            // Don't call a deliberate user pause or a different movement
+            // gesture a network hitch. Values remain approximate diagnostics.
+            if (gap > 25 && gap < 250)
+            {
+                _recentGapsOver25Ms++;
+                _recentMaxGapMs = Math.Max(_recentMaxGapMs, (int)Math.Round(gap));
+            }
+        }
+        _recentMovePackets++;
+        _lastMovementTimestamp = now;
+    }
+
+    private void FlushMovementCore()
+    {
+        if (!_smoothMotion || !_motion.HasPending) return;
+        var remaining = _motion.Drain();
+        MoveCore(remaining.Dx, remaining.Dy);
+    }
+
+    private static void MoveCore(int dx, int dy)
+    {
+        if ((dx == 0 && dy == 0) || !Native.GetCursorPos(out var cursor)) return;
+        var desktop = Native.Desktop();
+        long x = Math.Clamp((long)cursor.X + dx, desktop.Left, (long)desktop.Right - 1);
+        long y = Math.Clamp((long)cursor.Y + dy, desktop.Top, (long)desktop.Bottom - 1);
+        Native.SetCursorPos((int)x, (int)y);
     }
 
     private void ReleaseAllCore()
