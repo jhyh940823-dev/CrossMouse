@@ -66,6 +66,7 @@ final class MacConnection: @unchecked Sendable {
 
     func send(_ message: CrossMouseMessage) {
         queue.async { [self] in
+            guard !self.stopped else { return }
             guard self.sessionKey != nil else { return }
             if message.type == "move" {
                 self.pendingMoveX = max(-32768, min(32768, self.pendingMoveX + (message.dx ?? 0)))
@@ -88,15 +89,15 @@ final class MacConnection: @unchecked Sendable {
     }
 
     private func sendFrame(_ message: CrossMouseMessage) {
-        guard let connection, let key = sessionKey else { return }
+        guard !stopped, let connection, let key = sessionKey else { return }
         do {
             let frame = try CrossMouseWire.frame(
                 message, sessionKey: key, sequence: sendSequence,
                 direction: .macToWindows
             )
             sendSequence += 1
-            connection.send(content: frame, completion: .contentProcessed { [weak self] error in
-                if error != nil { self?.disconnect() }
+            connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
+                if error != nil, let connection { self?.disconnect(ifCurrent: connection) }
             })
         } catch {
             NSLog("CrossMouse: unable to encode event: %@", String(describing: error))
@@ -129,20 +130,30 @@ final class MacConnection: @unchecked Sendable {
                     let hello = try CrossMouseWire.clientHello(
                         secret: self.secret, clientNonce: self.clientNonce
                     )
-                    socket.send(content: hello, completion: .contentProcessed { [weak self] error in
-                        if error != nil { self?.disconnect() }
+                    socket.send(content: hello, completion: .contentProcessed { [weak self, weak socket] error in
+                        if error != nil, let socket { self?.disconnect(ifCurrent: socket) }
                     })
                     self.receive(socket)
                 } catch {
-                    self.disconnect()
+                    self.disconnect(ifCurrent: socket)
                 }
-            case .failed(_), .cancelled:
-                self.disconnect()
+            case .failed(_), .cancelled, .waiting(_):
+                // NWConnection may stay in .waiting forever when the Windows
+                // receiver is restarted. Retry with a fresh TCP connection.
+                self.disconnect(ifCurrent: socket)
             default:
                 break
             }
         }
         socket.start(queue: queue)
+        // A socket can be TCP-ready but never finish pairing (e.g. a stale
+        // listener or a server waiting for another client). Don't remain
+        // "Windows 연결 대기 중" indefinitely: retry the full handshake.
+        queue.asyncAfter(deadline: .now() + .seconds(7)) { [weak self, weak socket] in
+            guard let self, let socket, self.connection === socket,
+                  self.sessionKey == nil, !self.stopped else { return }
+            self.disconnect(ifCurrent: socket)
+        }
     }
 
     private func receive(_ socket: NWConnection) {
@@ -153,11 +164,11 @@ final class MacConnection: @unchecked Sendable {
                 try self.processBuffer()
             } catch {
                 NSLog("CrossMouse: rejected connection: %@", String(describing: error))
-                self.disconnect()
+                self.disconnect(ifCurrent: socket)
                 return
             }
             if complete || error != nil {
-                self.disconnect()
+                self.disconnect(ifCurrent: socket)
             } else {
                 self.receive(socket)
             }
@@ -187,7 +198,8 @@ final class MacConnection: @unchecked Sendable {
         }
     }
 
-    private func disconnect() {
+    private func disconnect(ifCurrent socket: NWConnection? = nil) {
+        if let socket, connection !== socket { return }
         let wasConnected = sessionKey != nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()

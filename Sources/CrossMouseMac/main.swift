@@ -227,8 +227,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
 
     @objc private func toggleConnection() {
         if connectionWanted {
-            setWindowsMode(false)
+            // Pausing must release Windows input, but must not forget that
+            // the user selected HDMI. Otherwise pressing Start silently
+            // reverts to Mac mode and the cursor cannot cross the boundary.
+            network.send(CrossMouseMessage(type: "leave"))
+            reclaimMac()
             connectionWanted = false
+            connected = false
             network.stop()
         } else {
             connectionWanted = true
@@ -367,7 +372,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        guard connected, windowsReady else { return Unmanaged.passUnretained(event) }
+        guard connectionWanted, connected, windowsReady else {
+            return Unmanaged.passUnretained(event)
+        }
         if !remoteActive {
             // Only enter on an unpressed mouse move, not while dragging a file.
             if type == .mouseMoved,
