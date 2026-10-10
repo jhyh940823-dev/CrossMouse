@@ -65,6 +65,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private let options: Options
     private var network: MacConnection!
     private var connected = false
+    private var connectionWanted = true
     private var windowsReady = false
     private var remoteActive = false
     private var pressedModifiers = Set<Int>()
@@ -79,6 +80,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var remoteCursorAnchor: CGPoint?
     private var transferAttempts = 0
     private var lastTransfer = "No handoff attempted yet"
+    private var controlWindow: MacControlWindow!
+    private var macModeItem: NSMenuItem!
+    private var windowsModeItem: NSMenuItem!
 
     init(options: Options) {
         self.options = options
@@ -86,8 +90,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
         setupMenu()
+        setupWindow()
         refreshDisplay()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -118,6 +123,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         network.start()
         installEventTap()
         updateMenu()
+        controlWindow.show()
         NSLog("CrossMouse: Mac boundary display ID %u, bounds %@", displayID, NSStringFromRect(displayBounds))
     }
 
@@ -126,6 +132,19 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         network?.stop()
         reclaimMac()
         if let eventTap { CFMachPortInvalidate(eventTap) }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        controlWindow.show()
+        return true
+    }
+
+    private func setupWindow() {
+        controlWindow = MacControlWindow()
+        controlWindow.onMacMode = { [weak self] in self?.setWindowsMode(false) }
+        controlWindow.onWindowsMode = { [weak self] in self?.setWindowsMode(true) }
+        controlWindow.onConnectionToggle = { [weak self] in self?.toggleConnection() }
+        controlWindow.onQuit = { [weak self] in self?.quitApp() }
     }
 
     private func setupMenu() {
@@ -142,10 +161,20 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         transferLine.isEnabled = false
         menu.addItem(transferLine)
         menu.addItem(.separator())
+        let showWindow = NSMenuItem(title: "CrossMouse 창 열기", action: #selector(showWindowAction), keyEquivalent: "")
+        showWindow.target = self
+        menu.addItem(showWindow)
+        macModeItem = NSMenuItem(title: "Mac 듀얼 모니터 (필립스 DVI)", action: #selector(selectMacMode), keyEquivalent: "")
+        macModeItem.target = self
+        menu.addItem(macModeItem)
+        windowsModeItem = NSMenuItem(title: "Windows 사용 (필립스 HDMI)", action: #selector(selectWindowsMode), keyEquivalent: "")
+        windowsModeItem.target = self
+        menu.addItem(windowsModeItem)
         readyItem = NSMenuItem(
             title: "Windows on right edge", action: #selector(toggleReady), keyEquivalent: ""
         )
         readyItem.target = self
+        readyItem.isEnabled = false
         menu.addItem(readyItem)
         let returnItem = NSMenuItem(
             title: "Return keyboard/mouse to Mac", action: #selector(returnToMac),
@@ -169,9 +198,42 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
     }
 
+    @objc private func showWindowAction() {
+        controlWindow.show()
+    }
+
+    @objc private func selectMacMode() {
+        setWindowsMode(false)
+    }
+
+    @objc private func selectWindowsMode() {
+        setWindowsMode(true)
+    }
+
+    private func setWindowsMode(_ enable: Bool) {
+        if !enable {
+            // Always inform Windows to release held keys and buttons, even
+            // if the handoff recently returned to Mac by moving left.
+            network?.send(CrossMouseMessage(type: "leave"))
+            reclaimMac()
+        }
+        windowsReady = enable
+        updateMenu()
+    }
+
     @objc private func toggleReady() {
-        windowsReady.toggle()
-        if !windowsReady { reclaimMac() }
+        setWindowsMode(!windowsReady)
+    }
+
+    @objc private func toggleConnection() {
+        if connectionWanted {
+            setWindowsMode(false)
+            connectionWanted = false
+            network.stop()
+        } else {
+            connectionWanted = true
+            network.start()
+        }
         updateMenu()
     }
 
@@ -196,7 +258,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func updateMenu() {
-        statusLine.title = connected ? (remoteActive ? "Windows is controlling" : "Connected to Windows") : "Windows disconnected"
+        statusLine.title = !connectionWanted ? "Connection paused" :
+            connected ? (remoteActive ? "Windows is controlling" : "Connected to Windows") :
+            "Windows disconnected"
         if eventTap != nil {
             captureLine.title = "Input capture installed"
         } else if !AXIsProcessTrusted() {
@@ -208,7 +272,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         }
         transferLine.title = lastTransfer
         readyItem.state = windowsReady ? .on : .off
+        macModeItem.state = windowsReady ? .off : .on
+        windowsModeItem.state = windowsReady ? .on : .off
         statusItem.button?.title = remoteActive ? "⇆ W" : "⇆"
+        controlWindow?.render(
+            connected: connected, connecting: connectionWanted,
+            windowsMode: windowsReady, captureStatus: captureLine.title
+        )
     }
 
     private func refreshDisplay() {

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>CrossMouse</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Reuse the exact protocol and Win32 input code from the tested CLI
+         receiver. Keeping them in one source location prevents divergence. -->
+    <Compile Include="../CrossMouse.Windows/WireProtocol.cs" Link="Core/WireProtocol.cs" />
+    <Compile Include="../CrossMouse.Windows/InputInjector.cs" Link="Core/InputInjector.cs" />
+    <Compile Include="../CrossMouse.Windows/KeyMapping.cs" Link="Core/KeyMapping.cs" />
+  </ItemGroup>
+</Project>

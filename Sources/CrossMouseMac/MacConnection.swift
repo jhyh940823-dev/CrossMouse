@@ -19,6 +19,9 @@ final class MacConnection: @unchecked Sendable {
     private var sendSequence: UInt64 = 0
     private var receiveSequence: UInt64 = 0
     private var stopped = false
+    private var moveTimer: DispatchSourceTimer?
+    private var pendingMoveX = 0
+    private var pendingMoveY = 0
 
     init(
         host: String,
@@ -35,31 +38,68 @@ final class MacConnection: @unchecked Sendable {
     }
 
     func start() {
-        queue.async { self.connect() }
+        queue.async { [self] in
+            self.stopped = false
+            if self.moveTimer == nil {
+                // Send at most one relative mouse movement per 8ms (~125 Hz).
+                // Coalesce high-Hz mouse events instead of letting hundreds of
+                // tiny encrypted TCP writes form a lagging input backlog.
+                let timer = DispatchSource.makeTimerSource(queue: self.queue)
+                timer.schedule(deadline: .now() + .milliseconds(8),
+                               repeating: .milliseconds(8), leeway: .milliseconds(1))
+                timer.setEventHandler { [weak self] in self?.flushMotion() }
+                self.moveTimer = timer
+                timer.resume()
+            }
+            self.connect()
+        }
     }
 
     func stop() {
         queue.async {
             self.stopped = true
+            self.moveTimer?.cancel()
+            self.moveTimer = nil
             self.disconnect()
         }
     }
 
     func send(_ message: CrossMouseMessage) {
         queue.async { [self] in
-            guard let connection = self.connection, let key = self.sessionKey else { return }
-            do {
-                let frame = try CrossMouseWire.frame(
-                    message, sessionKey: key, sequence: self.sendSequence,
-                    direction: .macToWindows
-                )
-                self.sendSequence += 1
-                connection.send(content: frame, completion: .contentProcessed { [weak self] error in
-                    if error != nil { self?.disconnect() }
-                })
-            } catch {
-                NSLog("CrossMouse: unable to encode event: %@", String(describing: error))
+            guard self.sessionKey != nil else { return }
+            if message.type == "move" {
+                self.pendingMoveX = max(-32768, min(32768, self.pendingMoveX + (message.dx ?? 0)))
+                self.pendingMoveY = max(-32768, min(32768, self.pendingMoveY + (message.dy ?? 0)))
+            } else {
+                // Preserve move-before-click and move-before-leave ordering.
+                self.flushMotion()
+                self.sendFrame(message)
             }
+        }
+    }
+
+    private func flushMotion() {
+        guard pendingMoveX != 0 || pendingMoveY != 0 else { return }
+        let dx = pendingMoveX
+        let dy = pendingMoveY
+        pendingMoveX = 0
+        pendingMoveY = 0
+        sendFrame(CrossMouseMessage(type: "move", dx: dx, dy: dy))
+    }
+
+    private func sendFrame(_ message: CrossMouseMessage) {
+        guard let connection, let key = sessionKey else { return }
+        do {
+            let frame = try CrossMouseWire.frame(
+                message, sessionKey: key, sequence: sendSequence,
+                direction: .macToWindows
+            )
+            sendSequence += 1
+            connection.send(content: frame, completion: .contentProcessed { [weak self] error in
+                if error != nil { self?.disconnect() }
+            })
+        } catch {
+            NSLog("CrossMouse: unable to encode event: %@", String(describing: error))
         }
     }
 
@@ -72,7 +112,14 @@ final class MacConnection: @unchecked Sendable {
         sessionKey = nil
         sendSequence = 0
         receiveSequence = 0
-        let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .tcp)
+        pendingMoveX = 0
+        pendingMoveY = 0
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let socket = NWConnection(
+            host: NWEndpoint.Host(host), port: endpointPort,
+            using: NWParameters(tls: nil, tcp: tcp)
+        )
         connection = socket
         socket.stateUpdateHandler = { [weak self, weak socket] state in
             guard let self, let socket, self.connection === socket else { return }
@@ -147,6 +194,8 @@ final class MacConnection: @unchecked Sendable {
         connection = nil
         sessionKey = nil
         buffer = FramedByteBuffer()
+        pendingMoveX = 0
+        pendingMoveY = 0
         if wasConnected { onConnected(false) }
         guard !stopped else { return }
         queue.asyncAfter(deadline: .now() + .seconds(2)) { [weak self] in

@@ -30,6 +30,10 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build Windows input receiver
         run: dotnet build windows/CrossMouse.Windows/CrossMouse.Windows.csproj -c Release
+      - name: Build Windows desktop GUI
+        run: dotnet build windows/CrossMouse.Windows.App/CrossMouse.Windows.App.csproj -c Release
+      - name: Windows GUI receiver start/handshake/stop smoke test
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --service-self-test
       - name: Protocol self-tests
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows -- --self-test
       - name: Publish Windows standalone receiver
@@ -38,3 +42,9 @@ jobs:
         with:
           name: CrossMouse-Windows-x64
           path: dist/windows/CrossMouse.Windows.exe
+      - name: Publish Windows desktop GUI
+        run: dotnet publish windows/CrossMouse.Windows.App -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o dist/windows-gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossMouse-Windows-GUI
+          path: dist/windows-gui/**
