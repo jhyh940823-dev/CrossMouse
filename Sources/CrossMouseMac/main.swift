@@ -76,6 +76,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var eventTap: CFMachPort?
     private var displayID: CGDirectDisplayID = 0
     private var displayBounds: CGRect = .zero
+    private var remoteCursorAnchor: CGPoint?
     private var transferAttempts = 0
     private var lastTransfer = "No handoff attempted yet"
 
@@ -123,6 +124,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         network?.send(CrossMouseMessage(type: "leave"))
         network?.stop()
+        reclaimMac()
         if let eventTap { CFMachPortInvalidate(eventTap) }
     }
 
@@ -210,6 +212,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshDisplay() {
+        // A monitor being reconfigured while Windows is active invalidates
+        // the parked cursor's geometry. Give control back to Mac first.
+        if remoteActive { forceReturn() }
         if let explicit = options.displayID {
             displayID = explicit
         } else if let samsung = NSScreen.screens.first(where: {
@@ -261,6 +266,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private func reclaimMac() {
         guard remoteActive else { return }
         remoteActive = false
+        remoteCursorAnchor = nil
         pressedModifiers.removeAll()
         let point = CGPoint(
             x: displayBounds.maxX - min(90, displayBounds.width / 4),
@@ -272,6 +278,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
 
     fileprivate func handleEvent(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // The keyboard and pointer must never remain remotely controlled
+            // without a working interception tap.
+            if remoteActive { forceReturn() }
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -296,12 +305,26 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                event.location.y < displayBounds.maxY,
                event.location.x >= displayBounds.maxX - 3,
                event.getIntegerValueField(.mouseEventDeltaX) > 0 {
+                let ratio = min(1, max(0, (event.location.y - displayBounds.minY) / displayBounds.height))
+                // Suppressing a session-level mouse event does not prevent
+                // WindowServer from updating the *local* cursor position.
+                // Keep the Mac pointer parked while forwarding relative deltas.
+                // Unlike global cursor disassociation, this cannot leave a
+                // user's pointer permanently disconnected if the app crashes.
+                let anchor = CGPoint(
+                    x: displayBounds.maxX - 5,
+                    y: min(max(event.location.y, displayBounds.minY + 2), displayBounds.maxY - 2)
+                )
+                guard CGWarpMouseCursorPosition(anchor) == .success else {
+                    lastTransfer = "Mac cursor lock failed — stayed on Mac"
+                    updateMenu()
+                    return Unmanaged.passUnretained(event)
+                }
                 remoteActive = true
                 transferAttempts += 1
                 lastTransfer = "Entered Windows (attempt \(transferAttempts))"
-                let ratio = min(1, max(0, (event.location.y - displayBounds.minY) / displayBounds.height))
+                remoteCursorAnchor = anchor
                 network.send(CrossMouseMessage(type: "enter", fractionY: ratio))
-                CGWarpMouseCursorPosition(CGPoint(x: displayBounds.maxX - 5, y: event.location.y))
                 updateMenu()
                 return nil
             }
@@ -314,6 +337,15 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             let dy = Int(event.getIntegerValueField(.mouseEventDeltaY))
             if dx != 0 || dy != 0 {
                 network.send(CrossMouseMessage(type: "move", dx: dx, dy: dy))
+            }
+            // Returning nil prevents local app delivery, but not all pointer
+            // motion at the session tap. Reposition after each captured delta.
+            // CGWarpMouseCursorPosition itself does not generate mouse events.
+            if let anchor = remoteCursorAnchor {
+                if CGWarpMouseCursorPosition(anchor) != .success {
+                    lastTransfer = "Mac cursor lock failed — returned to Mac"
+                    forceReturn()
+                }
             }
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
