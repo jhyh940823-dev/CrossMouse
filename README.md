@@ -1,5 +1,20 @@
 # CrossMouse
 
+## v0.3.7 — 자동 HDMI 진입 시 정지 커서 오복귀 수정
+
+사용자 보고: HDMI/DVI 시험 버튼은 작동하지만 핫코너로 전환하면 Windows 커서가 보이지 않고, 바로 움직이지 않으면 Mac으로 돌아옴.
+
+**수정 전 재현:** `f77158c`의 Windows CI `38052566633`에서 실제 주입기를 진입시킨 뒤, 디스플레이 변경 때 일어날 수 있는 커서 재배치를 왼쪽 경계로 모의했습니다. 원격 이동을 한 번도 보내지 않았는데 `Stationary cursor bounced to Mac (smooth=False, 0ms)`로 실패했습니다. 실제 필립스의 HDMI 신호 타이밍을 측정한 결과는 아닙니다.
+
+- **의도적인 복귀:** 좌표만 주기적으로 보던 판정을 바꿔, 원격 마우스의 실제 왼쪽 이동이 경계까지 적용된 경우에만 Mac 복귀를 요청합니다. 정지, 위아래 이동, 디스플레이에 의한 커서 재배치는 복귀 사유가 아닙니다. 남은 보정 이동/복귀 표시는 재진입 때 초기화합니다. 비상 복귀·연결 끊김·X 버튼의 안전 복귀는 그대로입니다.
+- **보이는 위치로 진입:** 핫코너 입력의 윗부분 좌표를 그대로 쓰지 않고, 자동 HDMI 전환에서는 Windows 화면 중앙으로 진입합니다. 위치 설정 후 실제 절대좌표 마우스 이동 이벤트를 한 번 보내 커서 표시 갱신을 요청합니다. 클릭·포커스 변경·전역 커서 숨김 카운터 조작은 하지 않습니다. 수동 삼성→Windows 경계 진입은 기존 왼쪽 진입 방식을 유지합니다.
+- **영상 전환 대기:** DDC 명령 종료 직후 입력을 넘기지 않습니다. Mac에서 최소 1.5초, 마지막 디스플레이 변경 알림 후 최소 0.4초 기다린 뒤 진입합니다(최대 5초). 이는 화면 신호 완료를 확인하는 기능이 아니라 제한된 안정 대기입니다. 그 사이 모드 변경·연결 중지·비상 복귀가 있으면 오래된 DDC 완료 콜백이 입력을 다시 넘기지 못합니다.
+- **불필요한 Mac 회수 방지:** 필립스 화면 변경 알림만으로 원격 입력을 중단하지 않습니다. 커서를 고정하는 삼성 모니터의 실제 ID/좌표가 바뀌거나 사라지는 경우에만 회수합니다.
+
+Mac/Windows 양쪽 v0.3.7 적용이 필요합니다. 페어링 키·방화벽·로그인 설정 정책은 변경하지 않습니다. Windows를 새 폴더에 빌드했다면 새 앱에서 로그인 자동 실행 경로를 확인하세요. 기존 HDMI/DVI 시험 확인값은 유지하며 사용자의 실제 모니터 전환 검증은 별도입니다.
+
+추가 검사: Windows `--automatic-entry-test`(정지 3초, 커서 외부 재배치, 수직 이동, 의도적인 왼쪽 복귀, 재진입, 가운데 위치/커서 표시), Swift `MonitorHandoffGateTests`(대기·취소·오래된 완료·화면 변경·중앙 진입 메시지). Windows 실제 원격 X·로그인 자동 실행 회귀도 유지합니다. 참고: [Microsoft MOUSEINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput), [GetCursorInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getcursorinfo), [Apple display change notification](https://developer.apple.com/documentation/appkit/nsapplication/didchangescreenparametersnotification).
+
 ## v0.3.6 — Mac/Windows 로그인 자동 실행
 
 각 앱에 **Mac 로그인 시 자동 실행 / Windows 로그인 시 자동 실행** 체크박스를 추가했습니다. 기본값은 꺼짐이고, 사용자가 켤 때만 해당 컴퓨터의 현재 사용자 계정에 등록합니다. 앱 실행이나 업데이트만으로 자동 등록하지 않습니다. 등록 후에는 **다음 로그인 때 창 없이 시작**하고, 기존 키/IP로 연결을 시도합니다. 로그인 시점에 상대 컴퓨터가 꺼져 있거나 네트워크가 늦게 준비돼도 기존 재연결 처리를 사용합니다.

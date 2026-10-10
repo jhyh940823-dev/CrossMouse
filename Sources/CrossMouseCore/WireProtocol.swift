@@ -27,6 +27,7 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
     public var vertical: Int?
     public var horizontal: Int?
     public var fractionY: Double?
+    public var centerCursor: Bool?
 
     public init(
         type: String,
@@ -37,7 +38,8 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
         code: Int? = nil,
         vertical: Int? = nil,
         horizontal: Int? = nil,
-        fractionY: Double? = nil
+        fractionY: Double? = nil,
+        centerCursor: Bool? = nil
     ) {
         self.type = type
         self.dx = dx
@@ -48,6 +50,7 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
         self.vertical = vertical
         self.horizontal = horizontal
         self.fractionY = fractionY
+        self.centerCursor = centerCursor
     }
 }
 

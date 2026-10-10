@@ -5,7 +5,7 @@ namespace CrossMouse.Windows;
 
 /// <summary>
 /// Inject only after an authenticated connection explicitly enters Windows.
-/// Mouse return detection uses the left edge of the Windows virtual desktop;
+/// Mouse return detection requires a remote leftward move to the desktop edge;
 /// the intended MVP setup has one Windows monitor (the right-hand Philips).
 /// </summary>
 internal sealed class InputInjector
@@ -20,6 +20,7 @@ internal sealed class InputInjector
     private int _recentMaxGapMs;
     private long _lastMovementTimestamp;
     private bool _remoteActive;
+    private bool _leftReturnPending;
 
     internal readonly record struct MotionGapStats(
         int MovePackets, int GapsOver25Ms, int MaxGapMs);
@@ -89,20 +90,28 @@ internal sealed class InputInjector
             {
                 ReleaseAllCore();
                 _motion.Reset();
+                _leftReturnPending = false;
                 _lastMovementTimestamp = 0;
                 var desktop = Native.Desktop();
                 var fraction = Math.Clamp(message.FractionY ?? 0.5, 0.0, 1.0);
-                int x = desktop.Left + Math.Min(64, Math.Max(8, desktop.Width / 8));
-                int y = desktop.Top + (int)Math.Round((desktop.Height - 1) * fraction);
+                int insetY = Math.Min(24, Math.Max(0, (desktop.Height - 1) / 2));
+                int x = message.CenterCursor == true
+                    ? desktop.Left + desktop.Width / 2
+                    : desktop.Left + Math.Min(64, Math.Max(8, desktop.Width / 8));
+                int y = message.CenterCursor == true
+                    ? desktop.Top + desktop.Height / 2
+                    : Math.Clamp(desktop.Top + (int)Math.Round((desktop.Height - 1) * fraction),
+                        desktop.Top + insetY, desktop.Bottom - 1 - insetY);
                 // A hidden/locked Windows session can reject cursor
                 // injection. Never tell Mac that Windows took control if
                 // the initial cursor placement failed.
-                _remoteActive = Native.SetCursorPos(x, y);
+                _remoteActive = Native.SetCursorPos(x, y) && Native.WakePointerAt(x, y);
                 return;
             }
             if (message.Type == "leave")
             {
                 _remoteActive = false;
+                _leftReturnPending = false;
                 _motion.Reset();
                 ReleaseAllCore();
                 return;
@@ -152,9 +161,19 @@ internal sealed class InputInjector
     {
         lock (_sync)
         {
-            if (!_remoteActive || !Native.GetCursorPos(out var point)) return false;
-            if (point.X > Native.Desktop().Left + 2) return false;
+            // A display/input switch may relocate the OS pointer without any
+            // mouse movement. Position alone must never mean "return to Mac".
+            // Only a successfully applied negative-X remote move can arm this.
+            if (!_remoteActive || !_leftReturnPending || !Native.GetCursorPos(out var point))
+                return false;
+            if (point.X > Native.Desktop().Left + 2)
+            {
+                _leftReturnPending = false;
+                return false;
+            }
             _remoteActive = false;
+            _leftReturnPending = false;
+            _motion.Reset();
             ReleaseAllCore();
             return true;
         }
@@ -165,6 +184,7 @@ internal sealed class InputInjector
         lock (_sync)
         {
             _remoteActive = false;
+            _leftReturnPending = false;
             _motion.Reset();
             ReleaseAllCore();
         }
@@ -195,13 +215,15 @@ internal sealed class InputInjector
         MoveCore(remaining.Dx, remaining.Dy);
     }
 
-    private static void MoveCore(int dx, int dy)
+    private void MoveCore(int dx, int dy)
     {
         if ((dx == 0 && dy == 0) || !Native.GetCursorPos(out var cursor)) return;
         var desktop = Native.Desktop();
         long x = Math.Clamp((long)cursor.X + dx, desktop.Left, (long)desktop.Right - 1);
         long y = Math.Clamp((long)cursor.Y + dy, desktop.Top, (long)desktop.Bottom - 1);
-        Native.SetCursorPos((int)x, (int)y);
+        if (!Native.SetCursorPos((int)x, (int)y)) return;
+        if (dx < 0 && x <= desktop.Left + 2) _leftReturnPending = true;
+        else if (dx > 0) _leftReturnPending = false;
     }
 
     private void ReleaseAllCore()
@@ -281,6 +303,33 @@ internal static class Native
         GetSystemMetrics(76), GetSystemMetrics(77),
         GetSystemMetrics(78), GetSystemMetrics(79)
     );
+
+    /// <summary>
+    /// Send an actual absolute mouse-move event on entry. SetCursorPos only
+    /// changes position; this refreshes the pointer without requiring the user
+    /// to move immediately, clicking anything, or changing ShowCursor counters.
+    /// </summary>
+    internal static bool WakePointerAt(int x, int y)
+    {
+        var desktop = Desktop();
+        if (desktop.Width <= 0 || desktop.Height <= 0) return false;
+        static int Normalize(int value, int origin, int size) =>
+            (int)Math.Clamp(((2L * (value - origin) + 1) * 65536) / (2L * size), 0, 65535);
+        var input = new Input
+        {
+            Type = 0,
+            Union = new InputUnion
+            {
+                Mouse = new MouseInput
+                {
+                    Dx = Normalize(x, desktop.Left, desktop.Width),
+                    Dy = Normalize(y, desktop.Top, desktop.Height),
+                    Flags = 0x0001 | 0x8000 | 0x4000 // MOVE | ABSOLUTE | VIRTUALDESK
+                }
+            }
+        };
+        return SendInput(1, [input], Marshal.SizeOf<Input>()) == 1;
+    }
 
     internal static void Key(int scanCode, bool down)
     {

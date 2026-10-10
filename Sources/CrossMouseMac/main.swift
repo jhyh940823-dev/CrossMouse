@@ -97,6 +97,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var autoInputSwitch = UserDefaults.standard.bool(forKey: "CrossMouse.autoInputSwitch")
     private var monitorStatus = "DDC 입력 전환은 확인 후에만 활성화할 수 있습니다."
     private var autoEnteredFromPhilips = false
+    private var automaticEntry = MonitorHandoffGate()
     private var launchedInBackground = false
 
     init(options: Options) {
@@ -135,7 +136,10 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     self.connected = value
                     self.receiverLiveness.reset()
                     self.receiverResponsive = false
-                    if !value { self.reclaimMac() }
+                    if !value {
+                        self.cancelAutomaticEntry()
+                        self.reclaimMac()
+                    }
                     else { self.network.send(CrossMouseMessage(type: "ping")) }
                     self.updateMenu()
                 }
@@ -347,6 +351,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func setWindowsMode(_ enable: Bool) {
+        cancelAutomaticEntry()
         hotCornerGate.reset()
         hotCornerHUD.hide()
         if !enable {
@@ -395,6 +400,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func setAutoInputSwitch(_ enabled: Bool) {
+        cancelAutomaticEntry()
         autoInputSwitch = enabled && verifiedHDMI && verifiedDVI
         UserDefaults.standard.set(autoInputSwitch, forKey: "CrossMouse.autoInputSwitch")
         hotCornerGate.reset()
@@ -455,8 +461,34 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func tickHotCorner() {
+        if automaticEntry.isPending {
+            guard connectionWanted, connected, receiverResponsive,
+                  autoInputSwitch, verifiedHDMI, verifiedDVI, eventTap != nil else {
+                cancelAutomaticEntry()
+                monitorStatus = "입력 전환 대기를 취소했습니다. Mac 제어를 유지합니다."
+                updateMenu()
+                return
+            }
+            switch automaticEntry.poll(at: ProcessInfo.processInfo.systemUptime) {
+            case .waiting:
+                return
+            case .timedOut:
+                ddcBusy = false
+                monitorStatus = "화면 변경이 안정되지 않아 커서를 Mac에 유지했습니다. 모니터 입력을 확인하세요."
+                updateMenu()
+                return
+            case .ready:
+                ddcBusy = false
+                setWindowsMode(true)
+                autoEnteredFromPhilips = true
+                monitorStatus = "HDMI 전환 대기 완료 · Windows 화면 중앙으로 커서를 이동합니다."
+                enterWindowsAfterHotCorner()
+                updateMenu()
+                return
+            }
+        }
         guard connectionWanted, connected, receiverResponsive, !windowsReady, !remoteActive,
-              autoInputSwitch, verifiedHDMI, verifiedDVI, !ddcBusy,
+              autoInputSwitch, verifiedHDMI, verifiedDVI, !ddcBusy, eventTap != nil,
               let philips = NSScreen.screens.first(where: {
                   $0.localizedName.localizedCaseInsensitiveContains("PHL 271E1")
               }),
@@ -484,25 +516,33 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             hotCornerHUD.show(on: philips, progress: fraction)
         case .triggered:
             hotCornerHUD.hide()
+            let token = automaticEntry.begin()
             ddcBusy = true
             monitorStatus = "필립스 HDMI 자동 전환 명령 실행 중…"
+            // Keep a visible, locally usable pointer on Samsung during the
+            // monitor's blank/switch interval. No input is captured yet.
+            CGWarpMouseCursorPosition(CGPoint(x: displayBounds.midX, y: displayBounds.midY))
             updateMenu()
-            let fraction = min(1, max(0, (pointer.y - bounds.minY) / bounds.height))
             monitorDDC.send(.hdmi) { [weak self] result in
                 guard let self else { return }
-                self.ddcBusy = false
+                guard self.automaticEntry.accepts(token) else {
+                    self.ddcBusy = false
+                    self.updateMenu()
+                    return
+                }
                 switch result {
                 case .success:
                     guard self.connected, self.connectionWanted, self.receiverResponsive else {
+                        self.automaticEntry.cancel()
+                        self.ddcBusy = false
                         self.monitorStatus = "모니터 명령을 보냈으나 Windows 연결이 끊겼습니다."
                         self.updateMenu()
                         return
                     }
-                    self.setWindowsMode(true)
-                    self.autoEnteredFromPhilips = true
-                    self.monitorStatus = "HDMI 자동 전환 명령 전송됨 · Windows로 커서 이동"
-                    self.enterWindowsAfterHotCorner(fractionY: fraction)
+                    self.automaticEntry.commandCompleted(token, at: ProcessInfo.processInfo.systemUptime)
+                    self.monitorStatus = "HDMI 명령 전송됨 · 화면 전환이 안정되기를 기다리는 중…"
                 case .failure(let error):
+                    self.ddcBusy = false
                     // Avoid further surprising triggers when the monitor
                     // failed a DDC request.
                     self.setAutoInputSwitch(false)
@@ -513,11 +553,19 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func enterWindowsAfterHotCorner(fractionY: Double) {
+    private func cancelAutomaticEntry() {
+        // A completed DDC command has no remaining process to wait for. An
+        // in-flight command owns ddcBusy until its callback returns, even if
+        // the user's newer mode selection invalidates this entry request.
+        if automaticEntry.isSettling { ddcBusy = false }
+        automaticEntry.cancel()
+    }
+
+    private func enterWindowsAfterHotCorner() {
         guard !remoteActive, connected, receiverResponsive, windowsReady else { return }
         let anchor = CGPoint(
             x: displayBounds.maxX - 5,
-            y: displayBounds.minY + displayBounds.height * fractionY
+            y: displayBounds.midY
         )
         guard CGWarpMouseCursorPosition(anchor) == .success else {
             monitorStatus = "Windows는 선택했지만 Mac 커서 고정에 실패했습니다."
@@ -528,12 +576,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         awaitingEnterAt = ProcessInfo.processInfo.systemUptime
         transferAttempts += 1
         lastTransfer = "Entered Windows via Philips hot corner"
-        network.send(CrossMouseMessage(type: "enter", fractionY: fractionY))
+        network.send(CrossMouseMessage(type: "enter", fractionY: 0.5, centerCursor: true))
         updateMenu()
     }
 
     @objc private func toggleConnection() {
         if connectionWanted {
+            cancelAutomaticEntry()
             // Pausing must release Windows input, but must not forget that
             // the user selected HDMI. Otherwise pressing Start silently
             // reverts to Mac mode and the cursor cannot cross the boundary.
@@ -602,19 +651,28 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshDisplay() {
-        // A monitor being reconfigured while Windows is active invalidates
-        // the parked cursor's geometry. Give control back to Mac first.
-        if remoteActive { forceReturn() }
+        let previous = CursorAnchorGeometry(displayID: displayID, bounds: displayBounds)
         if let explicit = options.displayID {
             displayID = explicit
         } else if let samsung = NSScreen.screens.first(where: {
             $0.localizedName.localizedCaseInsensitiveContains("samsung")
+                || $0.localizedName.localizedCaseInsensitiveContains("Smart M70F")
         }), let number = samsung.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
             displayID = CGDirectDisplayID(number.uint32Value)
         } else {
             displayID = CGMainDisplayID()
         }
         displayBounds = CGDisplayBounds(displayID)
+        automaticEntry.displayChanged(at: ProcessInfo.processInfo.systemUptime)
+        let next = CursorAnchorGeometry(displayID: displayID, bounds: displayBounds)
+        // HDMI/DVI notifications about Philips are expected. Only reclaim
+        // if Samsung (where the Mac cursor is actually parked) changed.
+        if remoteActive && previous.requiresReclaim(after: next, online: CGDisplayIsOnline(displayID) != 0) {
+            forceReturn()
+            windowsReady = false
+            lastTransfer = "Mac anchor display changed — returned to Mac"
+            updateMenu()
+        }
     }
 
     private func installEventTap() {
@@ -649,6 +707,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func forceReturn() {
+        cancelAutomaticEntry()
         network.send(CrossMouseMessage(type: "leave"))
         reclaimMac()
     }

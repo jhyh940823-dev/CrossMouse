@@ -16,6 +16,7 @@ internal static class AutomaticEntryRegression
         if (!Native.GetCursorPos(out var original)) return 1;
         try
         {
+            CheckCenteredEntry();
             foreach (bool smooth in new[] { false, true }) CheckIdleEntry(smooth);
             Console.WriteLine("PASS stationary entry, external cursor relocation, intentional left return");
             return 0;
@@ -27,6 +28,41 @@ internal static class AutomaticEntryRegression
         }
         finally { Native.SetCursorPos(original.X, original.Y); }
     }
+
+    private static void CheckCenteredEntry()
+    {
+        var injector = new InputInjector(smoothMotion: true);
+        try
+        {
+            injector.Apply(new MouseMessage { Type = "enter", FractionY = 0, CenterCursor = true });
+            Thread.Sleep(100); // Let Windows consume the entry mouse-move event.
+            var desktop = Native.Desktop();
+            if (!injector.IsRemotelyActive || !Native.GetCursorPos(out var pointer))
+                throw new Exception("Centered automatic entry was not accepted.");
+            if (Math.Abs(pointer.X - (desktop.Left + desktop.Width / 2)) > 1 ||
+                Math.Abs(pointer.Y - (desktop.Top + desktop.Height / 2)) > 1)
+                throw new Exception("Automatic entry left the cursor at the hot corner, not the center.");
+            var info = new CursorInfo { Size = System.Runtime.InteropServices.Marshal.SizeOf<CursorInfo>() };
+            if (!GetCursorInfo(ref info) || (info.Flags & 1) == 0)
+                throw new Exception("Windows CI cursor not visible after entry pointer refresh.");
+            if (injector.ReachedLeftEdge()) throw new Exception("Centered entry immediately returned.");
+            Console.WriteLine("PASS automatic entry cursor is centered and visible on Windows runner");
+        }
+        finally { injector.ReleaseAll(); }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct CursorInfo
+    {
+        internal int Size;
+        internal uint Flags;
+        internal nint Cursor;
+        internal Native.Point Position;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetCursorInfo(ref CursorInfo info);
 
     private static void CheckIdleEntry(bool smooth)
     {
