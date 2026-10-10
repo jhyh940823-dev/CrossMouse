@@ -18,7 +18,8 @@ final class DisplayReturnShortcutTests: XCTestCase {
             XCTAssertEqual(shortcut.handle(keyCode: f8, down: true, isRepeat: true,
                                             enabled: false), .consume)
         }
-        XCTAssertEqual(shortcut.handle(keyCode: f8, down: true, enabled: true), .consume)
+        // A new non-repeat down is a fresh press, including recovery from a lost up.
+        XCTAssertEqual(shortcut.handle(keyCode: f8, down: true, enabled: true), .requestDVI)
         XCTAssertEqual(shortcut.handle(keyCode: f8, down: false, enabled: true), .consume)
         XCTAssertEqual(shortcut.handle(keyCode: f8, down: true, enabled: true), .requestDVI)
     }

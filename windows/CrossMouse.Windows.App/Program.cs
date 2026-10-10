@@ -14,6 +14,14 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Contains("--service")) return SystemService.RunService();
+        if (args.Contains("--start-service")) return SystemService.Control(start: true);
+        if (args.Contains("--stop-service")) return SystemService.Control(start: false);
+        if (args.Contains("--session-agent"))
+        {
+            ApplicationConfiguration.Initialize();
+            return SystemService.RunSessionAgentAsync().GetAwaiter().GetResult();
+        }
         if (args.Contains("--service-self-test"))
         {
             // Windows CI smoke test: bind the real listener, authenticate
@@ -30,6 +38,8 @@ internal static class Program
             }
         }
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--reliability-test")) return ReliabilityRegression.Run();
+        if (args.Contains("--service-boundary-test")) return ServiceBoundaryRegression.Run();
         if (args.Contains("--pointer-cadence-test")) return PointerCadenceRegression.Run();
         if (args.Contains("--handoff-regression-test")) return HandoffRegression.Run();
         if (args.Contains("--automatic-entry-test"))

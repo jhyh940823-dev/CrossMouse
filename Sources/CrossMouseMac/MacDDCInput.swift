@@ -35,24 +35,40 @@ final class MacDDCInput {
     ]
     private let worker = DispatchQueue(label: "CrossMouse.philips-DDC", qos: .userInitiated)
 
+    func readInput(completion: @escaping @MainActor (Input?) -> Void) {
+        worker.async {
+            let input: Input?
+            do {
+                let tool = try Self.toolPath()
+                let display = try Self.resolveDisplay(tool)
+                let response = try Self.execute(tool, arguments: ["display", display, "get", "input"])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                input = Int(response).flatMap(Input.init(rawValue:))
+            } catch { input = nil }
+            Task { @MainActor in completion(input) }
+        }
+    }
+
+    nonisolated private static func resolveDisplay(_ tool: String) throws -> String {
+        let list = try execute(tool, arguments: ["display", "list"])
+        let matches = list.split(separator: "\n").compactMap { line -> String? in
+            guard line.localizedCaseInsensitiveContains("PHL 271E1"),
+                  let left = line.firstIndex(of: "("), let right = line.firstIndex(of: ")"), left < right
+            else { return nil }
+            let uuid = String(line[line.index(after: left)..<right])
+            return UUID(uuidString: uuid) == nil ? nil : uuid
+        }
+        guard !matches.isEmpty else { throw SwitchError.monitorMissing }
+        guard matches.count == 1 else { throw SwitchError.multipleMonitors }
+        return matches[0]
+    }
+
     func send(_ input: Input, completion: @escaping @MainActor (Result<Void, Error>) -> Void) {
         worker.async {
             let result: Result<Void, Error>
             do {
                 let tool = try Self.toolPath()
-                let list = try Self.execute(tool, arguments: ["display", "list"])
-                let uuids = list.split(separator: "\n").compactMap { line -> String? in
-                    guard line.localizedCaseInsensitiveContains("PHL 271E1"),
-                          let left = line.firstIndex(of: "("),
-                          let right = line.firstIndex(of: ")"),
-                          left < right else { return nil }
-                    let uuid = String(line[line.index(after: left)..<right])
-                    return UUID(uuidString: uuid) == nil ? nil : uuid
-                }
-                guard !uuids.isEmpty else { throw SwitchError.monitorMissing }
-                guard uuids.count == 1, let display = uuids.first else {
-                    throw SwitchError.multipleMonitors
-                }
+                let display = try Self.resolveDisplay(tool)
                 _ = try Self.execute(tool, arguments: [
                     "display", display, "set", "input", String(input.rawValue)
                 ])
@@ -77,15 +93,22 @@ final class MacDDCInput {
         process.arguments = arguments
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = Pipe()
+        process.standardError = output
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
-        let watchdog = DispatchWorkItem {
+        // m1ddc emits only small status lines. Wait for bounded process lifetime
+        // BEFORE a blocking EOF read. A stuck helper cannot latch ddcBusy forever.
+        if exited.wait(timeout: .now() + 4) == .timedOut {
             if process.isRunning { process.terminate() }
+            if exited.wait(timeout: .now() + 0.25) == .timedOut, process.isRunning {
+                _ = kill(process.processIdentifier, SIGKILL)
+                _ = exited.wait(timeout: .now() + 1)
+            }
+            try? output.fileHandleForReading.close()
+            throw SwitchError.timedOut
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 4, execute: watchdog)
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        watchdog.cancel()
         guard process.terminationStatus == 0 else {
             throw process.terminationReason == .uncaughtSignal
                 ? SwitchError.timedOut : SwitchError.failed

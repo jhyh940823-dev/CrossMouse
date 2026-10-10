@@ -21,6 +21,8 @@ internal sealed class InputInjector
     private long _lastMovementTimestamp;
     private bool _remoteActive;
     private bool _leftReturnPending;
+    private string? _inputFailure;
+    public string? InputFailure { get { lock (_sync) return _inputFailure; } }
     private Native.DesktopRectangle? _targetDisplay;
     public bool IsActiveForPresentation => Volatile.Read(ref _remoteActive);
     public void SelectTarget(Native.DesktopRectangle? display) { lock (_sync) _targetDisplay = display; }
@@ -81,7 +83,7 @@ internal sealed class InputInjector
         lock (_sync)
         {
             if (!_remoteActive || !_smoothMotion || !_motion.HasPending) return;
-            var step = _motion.Step();
+            var step = _motion.StepAt(Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency);
             MoveCore(step.Dx, step.Dy);
         }
     }
@@ -92,6 +94,7 @@ internal sealed class InputInjector
         {
             if (message.Type == "enter")
             {
+                _inputFailure = null;
                 ReleaseAllCore();
                 _motion.Reset();
                 _leftReturnPending = false;
@@ -128,33 +131,32 @@ internal sealed class InputInjector
                     int dx = Math.Clamp(message.Dx ?? 0, -2048, 2048);
                     int dy = Math.Clamp(message.Dy ?? 0, -2048, 2048);
                     RecordMovementGap();
-                    if (_smoothMotion) _motion.Add(dx, dy);
+                    if (_smoothMotion) _motion.AddAt(dx, dy,
+                        Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency, message.MotionTimeUs);
                     else MoveCore(dx, dy);
                     break;
                 case "button":
                     if (message.Button is int button && message.Down is bool down)
                     {
                         FlushMovementCore();
-                        if (down) _downButtons.Add(button);
-                        else _downButtons.Remove(button);
-                        Native.MouseButton(button, down);
+                        if (!Native.MouseButton(button, down)) { _inputFailure = "button-injection-denied"; break; }
+                        if (down) _downButtons.Add(button); else _downButtons.Remove(button);
                     }
                     break;
                 case "wheel":
                     FlushMovementCore();
                     if (message.Vertical is int vertical && vertical != 0)
-                        Native.Scroll(vertical, horizontal: false);
+                        if (!Native.Scroll(vertical, horizontal: false)) _inputFailure = "wheel-injection-denied";
                     if (message.Horizontal is int horizontal && horizontal != 0)
-                        Native.Scroll(horizontal, horizontal: true);
+                        if (!Native.Scroll(horizontal, horizontal: true)) _inputFailure = "wheel-injection-denied";
                     break;
                 case "key":
                     if (message.Code is int key && message.Down is bool pressed &&
                         KeyMapping.TryGet(key, out int scanCode))
                     {
                         FlushMovementCore();
-                        if (pressed) _downKeys.Add(key);
-                        else _downKeys.Remove(key);
-                        Native.Key(scanCode, pressed);
+                        if (!Native.Key(scanCode, pressed)) { _inputFailure = "key-injection-denied"; break; }
+                        if (pressed) _downKeys.Add(key); else _downKeys.Remove(key);
                     }
                     break;
             }
@@ -221,11 +223,13 @@ internal sealed class InputInjector
 
     private void MoveCore(int dx, int dy)
     {
-        if ((dx == 0 && dy == 0) || !Native.GetCursorPos(out var cursor)) return;
+        if (dx == 0 && dy == 0) return;
+        if (!Native.GetCursorPos(out var cursor)) { _inputFailure = "pointer-desktop-unavailable"; return; }
         var desktop = Desktop();
         long x = Math.Clamp((long)cursor.X + dx, desktop.Left, (long)desktop.Right - 1);
         long y = Math.Clamp((long)cursor.Y + dy, desktop.Top, (long)desktop.Bottom - 1);
-        if (!Native.SetCursorPos((int)x, (int)y)) return;
+        if (!Native.SetCursorPos((int)x, (int)y) || !Native.WakePointerAt((int)x, (int)y))
+        { _inputFailure = "pointer-position-denied"; return; }
         if (dx < 0 && x <= desktop.Left + 2) _leftReturnPending = true;
         else if (dx > 0) _leftReturnPending = false;
     }
@@ -291,11 +295,22 @@ internal static class Native
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint count, [In] Input[] inputs, int size);
 
-    [DllImport("user32.dll")]
-    internal static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll", EntryPoint = "GetCursorPos", SetLastError = true)]
+    private static extern bool GetCursorPosRaw(out Point point);
 
-    [DllImport("user32.dll")]
-    internal static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", EntryPoint = "SetCursorPos", SetLastError = true)]
+    private static extern bool SetCursorPosRaw(int x, int y);
+
+    internal static bool GetCursorPos(out Point point)
+    {
+        try { using var access = InputDesktopAccess.Enter(); return GetCursorPosRaw(out point); }
+        catch (System.ComponentModel.Win32Exception) { point = default; return false; }
+    }
+    internal static bool SetCursorPos(int x, int y)
+    {
+        try { using var access = InputDesktopAccess.Enter(); return SetCursorPosRaw(x, y); }
+        catch (System.ComponentModel.Win32Exception) { return false; }
+    }
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
@@ -332,15 +347,15 @@ internal static class Native
                 }
             }
         };
-        return SendInput(1, [input], Marshal.SizeOf<Input>()) == 1;
+        return Send(input);
     }
 
-    internal static void Key(int scanCode, bool down)
+    internal static bool Key(int scanCode, bool down)
     {
         uint flags = 0x0008; // KEYEVENTF_SCANCODE
         if ((scanCode & 0x100) != 0) flags |= 0x0001; // KEYEVENTF_EXTENDEDKEY
         if (!down) flags |= 0x0002; // KEYEVENTF_KEYUP
-        Send(new Input
+        return Send(new Input
         {
             Type = 1,
             Union = new InputUnion
@@ -350,7 +365,7 @@ internal static class Native
         });
     }
 
-    internal static void MouseButton(int button, bool down)
+    internal static bool MouseButton(int button, bool down)
     {
         uint flag;
         uint extra = 0;
@@ -361,20 +376,20 @@ internal static class Native
             case 2: flag = down ? 0x0020u : 0x0040u; break; // Middle
             case 3: flag = down ? 0x0080u : 0x0100u; extra = 1; break; // X1
             case 4: flag = down ? 0x0080u : 0x0100u; extra = 2; break; // X2
-            default: return;
+            default: return false;
         }
-        Send(new Input
+        return Send(new Input
         {
             Type = 0,
             Union = new InputUnion { Mouse = new MouseInput { Flags = flag, MouseData = extra } }
         });
     }
 
-    internal static void Scroll(int ticks, bool horizontal)
+    internal static bool Scroll(int ticks, bool horizontal)
     {
         // Windows WHEEL_DELTA is 120 units per conventional detent.
         int delta = Math.Clamp(ticks, -30, 30) * 120;
-        Send(new Input
+        return Send(new Input
         {
             Type = 0,
             Union = new InputUnion
@@ -388,8 +403,13 @@ internal static class Native
         });
     }
 
-    private static void Send(Input input)
+    private static bool Send(Input input)
     {
-        _ = SendInput(1, [input], Marshal.SizeOf<Input>());
+        try
+        {
+            using var access = InputDesktopAccess.Enter();
+            return SendInput(1, [input], Marshal.SizeOf<Input>()) == 1;
+        }
+        catch (System.ComponentModel.Win32Exception) { return false; }
     }
 }

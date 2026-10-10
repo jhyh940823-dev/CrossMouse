@@ -22,10 +22,15 @@ public struct DisplayReturnShortcut: Sendable {
             guard capturedPresses.remove(source) != nil else { return .pass }
             return .consume
         }
-        if capturedPresses.contains(source) { return .consume }
+        if isRepeat { return capturedPresses.contains(source) ? .consume : .pass }
+        // A fresh down starts a new physical press. Do not require an old up
+        // that may have been lost during sleep, a tap reset or a desktop switch.
+        // Idempotence of an in-flight DVI operation belongs to its transaction,
+        // not a permanently latched keyboard bit.
+        capturedPresses.remove(source)
         // Do not repurpose an F8 that began before this mode was enabled, or
         // modified F8 shortcuts belonging to another application.
-        guard enabled, !hasModifiers, !isRepeat else { return .pass }
+        guard enabled, !hasModifiers else { return .pass }
         capturedPresses.insert(source)
         return .requestDVI
     }

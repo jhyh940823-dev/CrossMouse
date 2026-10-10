@@ -4,7 +4,7 @@ import Foundation
 /// to Samsung does NOT change Philips' input. Only an explicit display-return
 /// request may enter switchingToMac. Each acquisition still has a fresh ID.
 public struct AutomaticHandoff: Sendable {
-    public enum DisplayInput: Equatable, Sendable { case macDVI, windowsHDMI }
+    public enum DisplayInput: Equatable, Sendable { case unknown, macDVI, windowsHDMI }
     public enum Phase: Equatable, Sendable {
         case local
         case preparing(String)
@@ -18,7 +18,7 @@ public struct AutomaticHandoff: Sendable {
     public private(set) var changedAt: TimeInterval = 0
     public private(set) var switchesDisplayOnEntry = true
     public private(set) var entryFractionY: Double = 0.5
-    public init() {}
+    public init(displayInput: DisplayInput = .macDVI) { self.displayInput = displayInput }
     public var id: String? {
         switch phase {
         case .local: nil
@@ -60,7 +60,7 @@ public struct AutomaticHandoff: Sendable {
     }
     public mutating func releaseInput(_ replyID: String?, reason: String?, now: TimeInterval) -> Bool {
         guard case .windows(let id) = phase, replyID == id,
-              reason == "left-edge" || reason == "window-close" else { return false }
+              reason == "left-edge" || reason == "window-close" || reason == "input-unavailable" else { return false }
         phase = .local; changedAt = now; return true
     }
     /// Call only for an explicit button/shortcut, after releasing input. Neither

@@ -100,9 +100,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var verifiedDVI = UserDefaults.standard.bool(forKey: "CrossMouse.ddcVerifiedDVI")
     private var autoInputSwitch = UserDefaults.standard.bool(forKey: "CrossMouse.autoInputSwitch")
     private var monitorStatus = "DDC 입력 전환은 확인 후에만 활성화할 수 있습니다."
-    private var automaticHandoff = AutomaticHandoff()
+    // A process restart does not change the physical monitor to DVI.
+    private var automaticHandoff = AutomaticHandoff(displayInput: .unknown)
     private var requestedMacDisplay = false
     private var displayReturnShortcut = DisplayReturnShortcut()
+    private var lastShortcutStatus = ""
+    private var focusRequestQueued = false
     private var pointerMotion = PointerMotionScale(percent:
         (UserDefaults.standard.object(forKey: "CrossMouse.windowsPointerSpeedPercent") as? NSNumber)?.doubleValue
             ?? PointerMotionScale.defaultPercent)
@@ -209,6 +212,18 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             self.sendInput(CrossMouseMessage(type: "move", dx: dx, dy: dy))
         }
         physicalPointer.start()
+        monitorDDC.readInput { [weak self] input in
+            guard let self, self.automaticHandoff.displayInput == .unknown,
+                  !self.automaticHandoff.inProgress, !self.ddcBusy else { return }
+            if let input {
+                self.automaticHandoff.selectDisplay(input == .hdmi ? .windowsHDMI : .macDVI)
+                self.monitorStatus = "모니터 입력 읽기: \(input == .hdmi ? "HDMI" : "DVI")"
+            } else {
+                self.monitorStatus = "현재 영상 입력 확인 불가 · F8로 Mac(DVI) 복귀 가능. 화면 모드를 선택해 주세요."
+            }
+            self.traceTransfer("startup-display", id: nil, reason: input.map { String($0.rawValue) } ?? "unknown")
+            self.updateMenu()
+        }
         updateMenu()
         refreshLoginItemStatus()
         if !launchedInBackground { controlWindow.show() }
@@ -384,6 +399,14 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func checkReceiverHeartbeat() {
+        if let eventTap, !CGEvent.tapIsEnabled(tap: eventTap) {
+            // Restore the owned tap after an OS timeout; never leave a non-null
+            // but disabled tap reported as installed. No key value is recorded.
+            displayReturnShortcut.reset()
+            if remoteActive { forceReturn() }
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+            traceTransfer("input-tap-reenabled", id: nil)
+        }
         let uptime = ProcessInfo.processInfo.systemUptime
         let wasResponsive = receiverResponsive
         receiverResponsive = connected && connectionWanted
@@ -685,6 +708,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private func traceTransfer(_ event: String, id: String?, reason: String? = nil) {
         // Causality only: never keys, clipboard, pairing secrets or user motion.
         NSLog("CrossMouse handoff id=%@ event=%@ reason=%@", id ?? "none", event, reason ?? "none")
+        DiagnosticTrace.shared.record(event, id: id, reason: reason)
     }
 
     private func sendInput(_ message: CrossMouseMessage) {
@@ -745,7 +769,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             connected ? (!receiverResponsive ? "Windows receiver not responding" :
                 remoteActive ? "Windows is controlling" : "Windows receiver ready") :
             "Windows disconnected"
-        if eventTap != nil {
+        if let eventTap, CGEvent.tapIsEnabled(tap: eventTap) {
             captureLine.title = "Input capture installed"
         } else if !AXIsProcessTrusted() {
             captureLine.title = "Input capture unavailable: Accessibility not granted"
@@ -761,10 +785,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         statusItem.button?.title = remoteActive ? "⇆ W" : "⇆"
         controlWindow?.render(
             connected: connected, connecting: connectionWanted,
-            windowsMode: windowsReady, captureStatus: captureLine.title,
+            windowsMode: windowsReady, captureStatus: captureLine.title + (lastShortcutStatus.isEmpty ? "" : " · " + lastShortcutStatus),
             receiverResponsive: receiverResponsive,
             autoVerified: verifiedHDMI && verifiedDVI, autoEnabled: autoInputSwitch,
-            monitorBusy: ddcBusy, monitorStatus: monitorStatus
+            monitorBusy: ddcBusy, monitorStatus: monitorStatus,
+            displayKnown: automaticHandoff.displayInput != .unknown
         )
         controlWindow?.renderPointerSpeed(pointerMotion.percent)
     }
@@ -859,12 +884,15 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         if let shortcutEvent = DisplayReturnEvent(type: type, event: event) {
             let decision = shortcutEvent.apply(
                 to: &displayReturnShortcut,
-                enabled: verifiedDVI && (windowsReady || automaticHandoff.inProgress || requestedMacDisplay)
+                enabled: verifiedDVI && (automaticHandoff.displayInput != .macDVI || automaticHandoff.inProgress || requestedMacDisplay)
             )
             switch decision {
             case .requestDVI:
                 traceTransfer("DVI-key-\(shortcutEvent.source.rawValue)", id: automaticHandoff.id)
-                requestMacDisplay()
+                lastShortcutStatus = "F8 수신됨"
+                // Never run DDC, window layout or ownership cleanup inside an
+                // input-tap callback: the OS may disable a slow callback.
+                DispatchQueue.main.async { [weak self] in self?.requestMacDisplay() }
                 return nil
             case .consume: return nil
             case .pass: break
@@ -902,7 +930,14 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                event.getIntegerValueField(.mouseEventDeltaX) > 0 {
                 let ratio = min(1, max(0, (event.location.y - displayBounds.minY) / displayBounds.height))
                 if peerCapability == "handoff-2" {
-                    _ = beginWindowsFocus(switchDisplay: false, fractionY: ratio)
+                    if !focusRequestQueued {
+                        focusRequestQueued = true
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            self.focusRequestQueued = false
+                            _ = self.beginWindowsFocus(switchDisplay: false, fractionY: ratio)
+                        }
+                    }
                     keepLocalCursorOnSamsung(event, type: type)
                     return nil
                 }

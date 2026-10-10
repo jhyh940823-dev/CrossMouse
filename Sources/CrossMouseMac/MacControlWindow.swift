@@ -184,9 +184,9 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
                 captureStatus: String, receiverResponsive: Bool = false,
                 autoVerified: Bool = false,
                 autoEnabled: Bool = false, monitorBusy: Bool = false,
-                monitorStatus: String = "") {
-        macButton.state = windowsMode ? .off : .on
-        windowsButton.state = windowsMode ? .on : .off
+                monitorStatus: String = "", displayKnown: Bool = true) {
+        macButton.state = displayKnown && !windowsMode ? .on : .off
+        windowsButton.state = displayKnown && windowsMode ? .on : .off
         statusLabel.stringValue = !connecting ? "Windows 연결 중지됨" :
             connected ? (receiverResponsive ? "Windows 수신기 정상 응답 · 연결됨" :
                 "TCP 연결됨 · Windows 수신기 응답 없음 (Windows 앱 버전 확인)") :

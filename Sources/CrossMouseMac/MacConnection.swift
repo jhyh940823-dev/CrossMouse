@@ -11,7 +11,7 @@ final class MacConnection: @unchecked Sendable {
     private let secret: Data
     private let onConnected: @Sendable (Bool) -> Void
     private let onMessage: @Sendable (CrossMouseMessage) -> Void
-    private let queue = DispatchQueue(label: "CrossMouse.connection")
+    private let queue = DispatchQueue(label: "CrossMouse.connection", qos: .userInteractive)
     private var connection: NWConnection?
     private var buffer = FramedByteBuffer()
     private var clientNonce = Data()
@@ -90,7 +90,8 @@ final class MacConnection: @unchecked Sendable {
         pendingMoveX = 0
         pendingMoveY = 0
         pendingTransferId = nil
-        sendFrame(CrossMouseMessage(type: "move", dx: dx, dy: dy, transferId: id))
+        sendFrame(CrossMouseMessage(type: "move", dx: dx, dy: dy, transferId: id,
+            motionTimeUs: Int64(DispatchTime.now().uptimeNanoseconds / 1_000)))
     }
 
     private func sendFrame(_ message: CrossMouseMessage) {

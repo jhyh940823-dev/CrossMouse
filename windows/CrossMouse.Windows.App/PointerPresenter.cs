@@ -10,18 +10,52 @@ namespace CrossMouse.Windows.App;
 /// when the native pointer is not shown. It runs independently of the settings UI.
 internal sealed class PointerPresenter : IDisposable
 {
+    private readonly object _sync = new();
+    private readonly Func<bool> _active;
+    private readonly bool _simulateHidden;
+    private readonly Action? _observedFrame;
+    private PointerSurfaceThread? _thread;
+    private string? _desktop;
+    private bool _disposed;
+    internal PointerPresenter(Func<bool> active, bool simulateHiddenNativePointerForTest = false,
+        Action? observedFrameForTest = null)
+    { _active = active; _simulateHidden = simulateHiddenNativePointerForTest; _observedFrame = observedFrameForTest; }
+    private PointerSurfaceThread? Current()
+    {
+        string? desktop = InputDesktopAccess.CurrentName();
+        lock (_sync)
+        {
+            if (_disposed) return null;
+            if (desktop != _desktop)
+            { _thread?.Dispose(); _thread = null; _desktop = desktop; }
+            if (desktop is null) return null;
+            return _thread ??= new PointerSurfaceThread(_active, _simulateHidden, _observedFrame, desktop);
+        }
+    }
+    internal bool RequestRefresh() => Current()?.RequestRefresh() ?? false;
+    internal Task<bool> VerifyAsync(CancellationToken token) => Current()?.VerifyAsync(token) ?? Task.FromResult(false);
+    public void Dispose()
+    { lock (_sync) { _disposed = true; _thread?.Dispose(); _thread = null; } }
+}
+
+/// A window belongs to exactly one desktop for its entire lifetime. Replace
+/// its thread when Windows changes desktop; never try to rebind an existing Form.
+internal sealed class PointerSurfaceThread : IDisposable
+{
     private readonly TaskCompletionSource<Surface> _surface = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Func<bool> _active;
     private int _disposed;
     private int _refreshQueued;
-    internal PointerPresenter(Func<bool> active, bool simulateHiddenNativePointerForTest = false,
-        Action? observedFrameForTest = null)
+    internal PointerSurfaceThread(Func<bool> active, bool simulateHiddenNativePointerForTest,
+        Action? observedFrameForTest, string expectedDesktop)
     {
         _active = active;
         var thread = new Thread(() =>
         {
             try
             {
+                using var desktop = InputDesktopAccess.Enter(createsWindow: true);
+                if (desktop.Name != expectedDesktop) throw new IOException("pointer-desktop-changed-before-create");
                 using var surface = new Surface(_active, simulateHiddenNativePointerForTest, observedFrameForTest);
                 _ = surface.Handle;
                 _surface.TrySetResult(surface);
@@ -92,7 +126,7 @@ internal sealed class PointerPresenter : IDisposable
     private sealed class Surface : Form
     {
         private readonly Func<bool> _active;
-        private Cursor _pointer = Cursors.Default;
+        private LayeredCursorImage? _image;
         private nint _cursorHandle;
         private readonly bool _simulateHidden;
         private readonly Action? _observedFrameForTest;
@@ -103,13 +137,12 @@ internal sealed class PointerPresenter : IDisposable
             _observedFrameForTest = observedFrameForTest;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false; TopMost = true;
-            BackColor = Color.Magenta; TransparencyKey = Color.Magenta;
-            DoubleBuffered = true;
+            AutoScaleMode = AutoScaleMode.None; // Win32 pointer coordinates are device pixels
         }
         protected override bool ShowWithoutActivation => true;
         protected override CreateParams CreateParams
         {
-            get { var cp = base.CreateParams; cp.ExStyle |= 0x00000020 | 0x00000080 | 0x08000000; return cp; }
+            get { var cp = base.CreateParams; cp.ExStyle |= 0x00080000 | 0x00000020 | 0x00000080 | 0x08000000; return cp; }
         }
         internal bool RefreshPointer()
         {
@@ -117,24 +150,35 @@ internal sealed class PointerPresenter : IDisposable
             _observedFrameForTest?.Invoke();
             var info = new CursorInfo { Size = Marshal.SizeOf<CursorInfo>() };
             if (!GetCursorInfo(ref info)) { if (Visible) Hide(); return false; }
-            if (!_simulateHidden && (info.Flags & 1) != 0) { if (Visible) Hide(); return true; }
-            bool cursorChanged = _cursorHandle != info.Cursor;
+            bool cursorChanged = _image is null || _cursorHandle != info.Cursor;
             if (cursorChanged)
             {
                 _cursorHandle = info.Cursor;
-                _pointer = info.Cursor != 0 ? new Cursor(info.Cursor) : Cursors.Default;
+                _image?.Dispose();
+                _image = new LayeredCursorImage(CursorRaster.Capture(info.Cursor));
             }
-            var hotspot = _pointer.HotSpot;
-            var next = new Rectangle(info.Position.X - hotspot.X, info.Position.Y - hotspot.Y,
-                _pointer.Size.Width, _pointer.Size.Height);
-            if (!Visible || Bounds != next || cursorChanged)
+            // CURSOR_SHOWING is only an OS flag. A null/transparent resource
+            // must not make us hide the only visible remote pointing surface.
+            if (!_simulateHidden && SystemInformation.MousePresent && (info.Flags & 1) != 0 && !_image!.Raster.UsedFallback)
             {
-                Bounds = next;
-                if (!Visible) Show();
-                Invalidate(); Update();
+                if (Visible) Hide();
+                return true;
             }
-            return Visible;
+            Bounds = new Rectangle(info.Position.X - _image!.Raster.HotX, info.Position.Y - _image.Raster.HotY,
+                _image.Raster.Width, _image.Raster.Height);
+            if (!Visible) Show();
+            if (!_image.Present(Handle, info.Position)) { Hide(); return false; }
+            return true;
         }
-        protected override void OnPaint(PaintEventArgs e) { _pointer.Draw(e.Graphics, ClientRectangle); }
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == 0x84) { message.Result = -1; return; } // HTTRANSPARENT
+            if (message.Msg == 0x21) { message.Result = 3; return; } // MA_NOACTIVATE
+            base.WndProc(ref message);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+        protected override void OnPaint(PaintEventArgs e) { }
+        protected override void Dispose(bool disposing)
+        { if (disposing) { _image?.Dispose(); _image = null; } base.Dispose(disposing); }
     }
 }

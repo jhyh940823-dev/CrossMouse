@@ -40,6 +40,8 @@ internal sealed class CrossMouseWindow : Form
     };
     private readonly Label _loginStatus = NewLabel("", 9);
     private bool _renderingLoginSetting;
+    private readonly bool _serviceManaged;
+    private bool _serviceControlBusy;
 
     // Unlike ordinary Close(), only QuitAsync is allowed to destroy the main
     // form. Application.Run(form) would otherwise exit and kill the receiver.
@@ -55,6 +57,7 @@ internal sealed class CrossMouseWindow : Form
         bool startInBackground = false, LoginStartup? loginStartup = null)
     {
         _startInBackground = startInBackground;
+        _serviceManaged = selfTestKey is null && SystemService.Installed;
         _backgroundStartPending = startInBackground;
         _loginStartup = loginStartup ?? new LoginStartup();
         string version = typeof(CrossMouseWindow).Assembly.GetName().Version?.ToString(3) ?? "unknown";
@@ -73,9 +76,12 @@ internal sealed class CrossMouseWindow : Form
         );
         try
         {
-            _pairingKey = selfTestKey ?? LoadOrCreateKey(_keyPath);
-            _receiver = new ReceiverService(_pairingKey, port);
-            _receiver.StatusChanged += UpdateStatus;
+            if (!_serviceManaged)
+            {
+                _pairingKey = selfTestKey ?? LoadOrCreateKey(_keyPath);
+                _receiver = new ReceiverService(_pairingKey, port);
+                _receiver.StatusChanged += UpdateStatus;
+            }
         }
         catch (Exception error)
         {
@@ -89,8 +95,10 @@ internal sealed class CrossMouseWindow : Form
         subtitle.ForeColor = SystemColors.GrayText;
         var address = NewLabel($"이 PC 주소: {LocalAddresses()}    ·    TCP 49431", 10);
         var instruction = NewLabel(
-            "맥북에서 CrossMouse를 실행하고 ‘Windows 사용 (HDMI)’을 선택하세요. " +
-            "필립스 화면은 모니터 버튼으로 HDMI로 변경해야 합니다.", 10
+            _serviceManaged ? "부팅 서비스가 로그인·잠금·관리자 허용 화면의 입력을 받습니다. " +
+                "서비스 시작/중지는 관리자 승인이 필요합니다. UAC·Windows 암호는 그대로 유지됩니다." :
+                "Mac에서 CrossMouse를 실행하면 연결됩니다. 일반 실행은 로그인 후에만 동작합니다. " +
+                "로그인·관리자 허용 화면에는 별도의 서비스 설치가 필요합니다.", 10
         );
         instruction.MaximumSize = new Size(490, 0);
         instruction.AutoSize = true;
@@ -109,7 +117,7 @@ internal sealed class CrossMouseWindow : Form
             WrapContents = false,
             Margin = new Padding(0, 4, 0, 4)
         };
-        _start.Click += (_, _) => StartReceiver();
+        _start.Click += async (_, _) => { if (_serviceManaged) await SetServiceRunningAsync(true); else StartReceiver(); };
         _stop.Click += async (_, _) => await StopReceiverAsync();
         _exit.Click += async (_, _) => await QuitAsync();
         _smoothing.CheckedChanged += (_, _) =>
@@ -119,6 +127,14 @@ internal sealed class CrossMouseWindow : Form
             if (receiver is not null)
                 _ = Task.Run(() => receiver.SetSmoothingEnabled(enabled));
         };
+        if (_serviceManaged)
+        {
+            _smoothing.Enabled = false;
+            _start.Text = "서비스 시작(관리자)";
+            _stop.Text = "서비스 중지(관리자)";
+            _exit.Text = "공유 완전 종료(관리자)";
+            _loginCheck.Text = "로그인 시 설정 앱 실행 (입력 서비스는 부팅 시 시작)";
+        }
         _motionStats.ForeColor = SystemColors.GrayText;
         _motionStats.MaximumSize = new Size(490, 0);
         _motionStats.AutoSize = true;
@@ -156,7 +172,7 @@ internal sealed class CrossMouseWindow : Form
 
         var trayMenu = new ContextMenuStrip();
         trayMenu.Items.Add("창 열기", null, (_, _) => RestoreWindow());
-        trayMenu.Items.Add("연결 시작", null, (_, _) => StartReceiver());
+        trayMenu.Items.Add("연결 시작", null, async (_, _) => { if (_serviceManaged) await SetServiceRunningAsync(true); else StartReceiver(); });
         trayMenu.Items.Add("연결 중지", null, async (_, _) => await StopReceiverAsync());
         trayMenu.Items.Add(new ToolStripSeparator());
         trayMenu.Items.Add("완전 종료", null, async (_, _) => await QuitAsync());
@@ -303,6 +319,11 @@ internal sealed class CrossMouseWindow : Form
 
     private void StartReceiver()
     {
+        if (_serviceManaged)
+        {
+            RenderServiceStatus();
+            return; // Load must not elevate or start a second network listener.
+        }
         if (_receiver is null || _closing || _receiver.IsRunning) return;
         try
         {
@@ -326,6 +347,11 @@ internal sealed class CrossMouseWindow : Form
 
     private async Task StopReceiverAsync()
     {
+        if (_serviceManaged)
+        {
+            await SetServiceRunningAsync(false);
+            return;
+        }
         var receiver = _receiver;
         if (receiver is null || !receiver.IsRunning) return;
         _stop.Enabled = false;
@@ -350,6 +376,7 @@ internal sealed class CrossMouseWindow : Form
 
     private async Task UpdateMouseStatsAsync()
     {
+        if (_serviceManaged) { RenderServiceStatus(); return; }
         // Input injection can synchronously dispatch Windows GUI messages
         // while holding its lock. The Windows UI must NEVER wait for that
         // lock, including the stats timer or checkbox callbacks.
@@ -396,6 +423,7 @@ internal sealed class CrossMouseWindow : Form
     private async Task QuitAsync()
     {
         if (_closing) return;
+        if (_serviceManaged && SystemService.Running && !await SetServiceRunningAsync(false)) return;
         _closing = true;
         _tray.Visible = false;
         try
@@ -440,10 +468,31 @@ internal sealed class CrossMouseWindow : Form
                     }
                 });
             }
+            else if (_serviceManaged) _ = ServiceControlPipe.ReturnInputAsync();
             return;
         }
         // Explicit Exit already released the receiver. Never grab the input
         // lock on the GUI thread, even during shutdown.
         base.OnFormClosing(e);
+    }
+
+    private void RenderServiceStatus()
+    {
+        if (_closing || IsDisposed) return;
+        var status = SystemService.ReadStatus();
+        bool running = SystemService.Running;
+        _status.Text = status?.State == "Connected" ? "서비스 연결됨" : running ? "서비스 실행 · 연결 대기" : "서비스 중지됨";
+        _detail.Text = status is null ? "부팅 서비스 상태를 확인하는 중입니다." :
+            $"Windows v{status.Version} · 데스크톱 {status.Desktop ?? "접근 불가"} · " + (status.Active ? "Mac 입력 제어 중" : "입력 대기");
+        _motionStats.Text = status?.Fault ?? "서비스가 입력을 받습니다. X는 설정창만 숨기고 커서 제어를 Mac으로 돌립니다.";
+        _start.Enabled = !running && !_serviceControlBusy;
+        _stop.Enabled = running && !_serviceControlBusy;
+    }
+    private async Task<bool> SetServiceRunningAsync(bool start)
+    {
+        if (_serviceControlBusy) return false;
+        _serviceControlBusy = true; RenderServiceStatus();
+        try { return await SystemService.RequestControlAsync(start); }
+        finally { _serviceControlBusy = false; RenderServiceStatus(); }
     }
 }

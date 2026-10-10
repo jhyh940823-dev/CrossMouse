@@ -7,13 +7,16 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>CrossMouse</AssemblyName>
-    <Version>0.4.4</Version>
+    <Version>0.5.0</Version>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
     <!-- Reuse the exact protocol and Win32 input code from the tested CLI
          receiver. Keeping them in one source location prevents divergence. -->
     <Compile Include="../CrossMouse.Windows/WireProtocol.cs" Link="Core/WireProtocol.cs" />
     <Compile Include="../CrossMouse.Windows/InputInjector.cs" Link="Core/InputInjector.cs" />
+    <Compile Include="../CrossMouse.Windows/InputDesktopAccess.cs" Link="Core/InputDesktopAccess.cs" />
     <Compile Include="../CrossMouse.Windows/MotionSmoother.cs" Link="Core/MotionSmoother.cs" />
     <Compile Include="../CrossMouse.Windows/KeyMapping.cs" Link="Core/KeyMapping.cs" />
   </ItemGroup>

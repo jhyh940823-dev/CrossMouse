@@ -17,6 +17,7 @@ internal sealed class ReceiverService : IAsyncDisposable
 {
     private readonly byte[] _key;
     private readonly int _port;
+    private readonly bool _rejectLocalPeers;
     private readonly InputInjector _injector = new(smoothMotion: true);
     private TcpListener? _listener;
     private TcpClient? _activeClient;
@@ -33,15 +34,17 @@ internal sealed class ReceiverService : IAsyncDisposable
 
     public event Action<ReceiverState, string>? StatusChanged;
 
-    public ReceiverService(byte[] key, int port = 49431)
+    public ReceiverService(byte[] key, int port = 49431, bool rejectLocalPeers = false)
     {
         if (key.Length != 32) throw new ArgumentException("Invalid pairing key.", nameof(key));
         _key = key;
         _port = port;
+        _rejectLocalPeers = rejectLocalPeers;
     }
 
     public bool IsRunning => _listener is not null;
     public bool IsRemotelyActive => _injector.IsRemotelyActive;
+    public string? InputFailure => _injector.InputFailure;
     public int ListeningPort =>
         (_listener?.LocalEndpoint as IPEndPoint)?.Port ?? 0;
 
@@ -139,6 +142,7 @@ internal sealed class ReceiverService : IAsyncDisposable
             while (!cancellationToken.IsCancellationRequested)
             {
                 using TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
+                if (_rejectLocalPeers && IsLocalClient(client)) continue;
                 _activeClient = client;
                 client.NoDelay = true; // No delayed ACK/Nagle on the return path.
                 try
@@ -170,7 +174,9 @@ internal sealed class ReceiverService : IAsyncDisposable
                             {
                                 await channel.SendAsync(
                                     new MouseMessage { Type = "pong", Capability = HandoffCapability,
-                                        Version = typeof(ReceiverService).Assembly.GetName().Version?.ToString(3) },
+                                        Version = typeof(ReceiverService).Assembly.GetName().Version?.ToString(3),
+                                        InputDesktop = InputDesktopAccess.CurrentName(),
+                                        ServiceMode = System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem },
                                     sessionCancel.Token
                                 ).ConfigureAwait(false);
                                 continue;
@@ -289,14 +295,21 @@ internal sealed class ReceiverService : IAsyncDisposable
         {
             await Task.Delay(8, cancellationToken).ConfigureAwait(false);
             string? id;
+            string reason = "left-edge";
             lock (_handoff)
             {
-                if (!_injector.ReachedLeftEdge()) continue;
+                if (!_injector.IsRemotelyActive) continue;
+                if (_injector.InputFailure is not null || InputDesktopAccess.CurrentName() is null)
+                {
+                    reason = "input-unavailable";
+                    _injector.ReleaseAll();
+                }
+                else if (!_injector.ReachedLeftEdge()) continue;
                 id = _activeId; _activeId = _preparedId = null;
                 _activationCancel?.Cancel();
             }
             await channel.SendAsync(new MouseMessage { Type = "leave", TransferId = id,
-                Reason = "left-edge" }, cancellationToken).ConfigureAwait(false);
+                Reason = reason }, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -331,6 +344,21 @@ internal sealed class ReceiverService : IAsyncDisposable
         await StopAsync().ConfigureAwait(false);
         _activationCancel?.Dispose();
         _presenter?.Dispose();
+    }
+
+    private static bool IsLocalClient(TcpClient client)
+    {
+        if (client.Client.RemoteEndPoint is not IPEndPoint peer) return true;
+        var address = peer.Address.IsIPv4MappedToIPv6 ? peer.Address.MapToIPv4() : peer.Address;
+        if (IPAddress.IsLoopback(address)) return true;
+        // A local unprivileged process must not use the previous per-user key
+        // to request SYSTEM input via loopback or this machine's LAN address.
+        try
+        {
+            return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .SelectMany(n => n.GetIPProperties().UnicastAddresses).Any(a => a.Address.Equals(address));
+        }
+        catch (System.Net.NetworkInformation.NetworkInformationException) { return true; }
     }
 
     private void StartPreparation(string id, SecureChannel channel, CancellationToken session)
