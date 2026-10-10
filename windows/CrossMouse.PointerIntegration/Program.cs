@@ -28,7 +28,7 @@ internal static class Program
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         var token = timeout.Token;
         string? chrome = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolderProgramFilesX86()),
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) }
             .Select(root => Path.Combine(root, "Google", "Chrome", "Application", "chrome.exe")).FirstOrDefault(File.Exists);
         if (chrome is null) throw new FileNotFoundException("Integration runner must contain Chrome; not silently skipped.");
@@ -161,10 +161,25 @@ internal static class Program
     }
     private static Bitmap Crop(Rectangle region)
     {
-        var bitmap = new Bitmap(region.Width, region.Height);
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.CopyFromScreen(region.Location, Point.Empty, region.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
-        return bitmap;
+        var bitmap = new Bitmap(region.Width, region.Height, PixelFormat.Format32bppArgb);
+        try
+        {
+            using var graphics = Graphics.FromImage(bitmap);
+            nint destination = graphics.GetHdc();
+            nint source = GetDC(0);
+            try
+            {
+                Require(source != 0 && BitBlt(destination, 0, 0, region.Width, region.Height,
+                    source, region.X, region.Y, 0x00CC0020 | 0x40000000), "Layered fixture pixel capture failed.");
+            }
+            finally
+            {
+                if (source != 0) ReleaseDC(0, source);
+                graphics.ReleaseHdc(destination);
+            }
+            return bitmap;
+        }
+        catch { bitmap.Dispose(); throw; }
     }
     private sealed class Cdp : IDisposable
     {
@@ -206,5 +221,9 @@ internal static class Program
     [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out Rect bounds);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(nint window, StringBuilder name, int count);
     [DllImport("user32.dll")] private static extern bool PostMessageW(nint window, uint message, nuint wParam, nint lParam);
+    [DllImport("user32.dll")] private static extern nint GetDC(nint window);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(nint window, nint dc);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern bool BitBlt(nint target, int x, int y,
+        int width, int height, nint source, int sourceX, int sourceY, uint operation);
     [DllImport("dwmapi.dll")] private static extern int DwmFlush();
 }
