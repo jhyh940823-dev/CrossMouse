@@ -1,13 +1,16 @@
 import AppKit
 
-/// A real, launchable macOS control window. Closing it quits the helper
-/// so input interception cannot be left running invisibly.
+/// A real, launchable macOS control window. Closing only hides it;
+/// the menu bar item continues to expose status and an explicit Quit action.
 @MainActor
 final class MacControlWindow: NSWindowController, NSWindowDelegate {
     var onMacMode: (() -> Void)?
     var onWindowsMode: (() -> Void)?
     var onConnectionToggle: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onHDMITest: (() -> Void)?
+    var onDVITest: (() -> Void)?
+    var onAutoSwitch: ((Bool) -> Void)?
 
     private let macButton = NSButton(radioButtonWithTitle: "Mac 듀얼 모니터 (DVI)", target: nil, action: nil)
     private let windowsButton = NSButton(radioButtonWithTitle: "Windows 사용 (HDMI)", target: nil, action: nil)
@@ -16,19 +19,27 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     private let statusLabel = NSTextField(labelWithString: "Windows 연결 확인 중…")
     private let modeDescription = NSTextField(labelWithString: "")
     private let diagnosticsLabel = NSTextField(labelWithString: "")
+    private let noteLabel = NSTextField(labelWithString: "")
+    private let ddcTestButton = NSButton(title: "HDMI 전환 시험", target: nil, action: nil)
+    private let ddcReturnButton = NSButton(title: "DVI 복귀 시험", target: nil, action: nil)
+    private let autoSwitchCheck = NSButton(
+        checkboxWithTitle: "필립스 오른쪽 위 1.25초 머물면 Windows로 전환",
+        target: nil, action: nil
+    )
+    private let monitorStatusLabel = NSTextField(labelWithString: "")
 
     init() {
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 515, height: 350),
+            contentRect: CGRect(x: 0, y: 0, width: 565, height: 465),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "CrossMouse"
-        window.center()
-        window.minSize = NSSize(width: 475, height: 325)
+        window.minSize = NSSize(width: 550, height: 455)
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        placeOnSamsung()
         window.delegate = self
         configureWindow(window)
     }
@@ -65,6 +76,19 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         quitButton.target = self
         quitButton.action = #selector(quit)
         quitButton.bezelStyle = .rounded
+        ddcTestButton.target = self
+        ddcTestButton.action = #selector(testHDMI)
+        ddcTestButton.bezelStyle = .rounded
+        ddcReturnButton.target = self
+        ddcReturnButton.action = #selector(testDVI)
+        ddcReturnButton.bezelStyle = .rounded
+        autoSwitchCheck.target = self
+        autoSwitchCheck.action = #selector(toggleAutoSwitch)
+        autoSwitchCheck.font = .systemFont(ofSize: 12)
+        monitorStatusLabel.font = .systemFont(ofSize: 12)
+        monitorStatusLabel.textColor = .secondaryLabelColor
+        monitorStatusLabel.maximumNumberOfLines = 0
+        monitorStatusLabel.lineBreakMode = .byWordWrapping
 
         let modeRow = NSStackView(views: [macButton, windowsButton])
         modeRow.orientation = .horizontal
@@ -72,15 +96,19 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         let actionRow = NSStackView(views: [connectionButton, quitButton])
         actionRow.orientation = .horizontal
         actionRow.spacing = 12
+        let ddcRow = NSStackView(views: [ddcTestButton, ddcReturnButton])
+        ddcRow.orientation = .horizontal
+        ddcRow.spacing = 12
 
-        let note = text(
-            "모니터 입력(DVI / HDMI)은 모니터 버튼으로 직접 바꾼 뒤, 여기서 같은 모드를 선택하세요. 창을 닫으면 앱도 종료됩니다.",
-            size: 12
-        )
-        note.textColor = .secondaryLabelColor
+        noteLabel.stringValue = "X 버튼은 창만 숨깁니다. 앱은 상단 ⇆ 메뉴에서 다시 열 수 있고, '앱 종료'로 완전히 끕니다."
+        noteLabel.font = .systemFont(ofSize: 12)
+        noteLabel.textColor = .secondaryLabelColor
+        noteLabel.maximumNumberOfLines = 0
+        noteLabel.lineBreakMode = .byWordWrapping
         let stack = NSStackView(views: [
             title, subtitle, statusLabel, section, modeRow,
-            modeDescription, diagnosticsLabel, actionRow, note
+            modeDescription, diagnosticsLabel, ddcRow,
+            autoSwitchCheck, monitorStatusLabel, actionRow, noteLabel
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -97,7 +125,9 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     }
 
     func render(connected: Bool, connecting: Bool, windowsMode: Bool,
-                captureStatus: String) {
+                captureStatus: String, autoVerified: Bool = false,
+                autoEnabled: Bool = false, monitorBusy: Bool = false,
+                monitorStatus: String = "") {
         macButton.state = windowsMode ? .off : .on
         windowsButton.state = windowsMode ? .on : .off
         statusLabel.stringValue = !connecting ? "Windows 연결 중지됨" :
@@ -107,20 +137,55 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
             ? "삼성 오른쪽 끝 → 필립스 Windows, 왼쪽 끝 → Mac 복귀"
             : "Mac 듀얼 화면: 삼성에서 필립스로 커서가 정상 이동합니다."
         diagnosticsLabel.stringValue = captureStatus
+        ddcTestButton.isEnabled = !monitorBusy
+        ddcReturnButton.isEnabled = !monitorBusy
+        autoSwitchCheck.isEnabled = autoVerified && !monitorBusy
+        autoSwitchCheck.state = autoVerified && autoEnabled ? .on : .off
+        monitorStatusLabel.stringValue = monitorStatus.isEmpty
+            ? "모니터 입력 자동 전환은 시험 성공 확인 후 사용할 수 있습니다."
+            : monitorStatus
     }
 
     func show() {
+        placeOnSamsung()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func windowWillClose(_ notification: Notification) {
-        onQuit?()
+    /// The Philips can immediately stop showing Mac video when a DDC test
+    /// succeeds. Always keep settings and confirmation dialogs accessible
+    /// on the Samsung Mac screen instead of the disappearing Philips.
+    private func placeOnSamsung() {
+        guard let window else { return }
+        let samsung = NSScreen.screens.first {
+            $0.localizedName.localizedCaseInsensitiveContains("Smart M70F")
+                || $0.localizedName.localizedCaseInsensitiveContains("Samsung")
+        } ?? NSScreen.main
+        guard let samsung else {
+            window.center()
+            return
+        }
+        let visible = samsung.visibleFrame
+        let frame = window.frame
+        window.setFrameOrigin(CGPoint(
+            x: visible.midX - frame.width / 2,
+            y: visible.midY - frame.height / 2
+        ))
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
     }
 
     @objc private func selectMac() { onMacMode?() }
     @objc private func selectWindows() { onWindowsMode?() }
     @objc private func toggleConnection() { onConnectionToggle?() }
     @objc private func quit() { onQuit?() }
+    @objc private func testHDMI() { onHDMITest?() }
+    @objc private func testDVI() { onDVITest?() }
+    @objc private func toggleAutoSwitch() {
+        onAutoSwitch?(autoSwitchCheck.state == .on)
+    }
 }

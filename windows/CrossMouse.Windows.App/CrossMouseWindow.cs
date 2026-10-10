@@ -9,7 +9,7 @@ namespace CrossMouse.Windows.App;
 
 /// <summary>
 /// Ordinary Windows desktop app with Start / Stop / Exit controls.
-/// Minimizing puts the app in the notification area; closing fully exits.
+/// Minimize and X close only hide to tray; only an explicit Exit fully stops.
 /// </summary>
 internal sealed class CrossMouseWindow : Form
 {
@@ -72,7 +72,7 @@ internal sealed class CrossMouseWindow : Form
         instruction.AutoSize = true;
         var privacy = NewLabel(
             "키보드·마우스는 페어링된 Mac과만 암호화하여 공유합니다. " +
-            "‘앱 종료’를 누르거나 창을 닫으면 수신을 중지합니다.", 9
+            "X 버튼은 창만 숨깁니다. 작업 표시줄 알림 영역에서 다시 열 수 있고, ‘앱 종료’는 완전히 종료합니다.", 9
         );
         privacy.ForeColor = SystemColors.GrayText;
         privacy.MaximumSize = new Size(490, 0);
@@ -87,7 +87,7 @@ internal sealed class CrossMouseWindow : Form
         };
         _start.Click += (_, _) => StartReceiver();
         _stop.Click += async (_, _) => await StopReceiverAsync();
-        _exit.Click += (_, _) => Close();
+        _exit.Click += async (_, _) => await QuitAsync();
         _smoothing.CheckedChanged += (_, _) =>
             _receiver?.SetSmoothingEnabled(_smoothing.Checked);
         _motionStats.ForeColor = SystemColors.GrayText;
@@ -125,7 +125,7 @@ internal sealed class CrossMouseWindow : Form
         trayMenu.Items.Add("연결 시작", null, (_, _) => StartReceiver());
         trayMenu.Items.Add("연결 중지", null, async (_, _) => await StopReceiverAsync());
         trayMenu.Items.Add(new ToolStripSeparator());
-        trayMenu.Items.Add("종료", null, (_, _) => { RestoreWindow(); Close(); });
+        trayMenu.Items.Add("완전 종료", null, async (_, _) => await QuitAsync());
         _tray = new NotifyIcon
         {
             Icon = SystemIcons.Application,
@@ -292,27 +292,33 @@ internal sealed class CrossMouseWindow : Form
         Activate();
     }
 
-    protected override async void OnFormClosing(FormClosingEventArgs e)
+    private async Task QuitAsync()
     {
-        if (!_closing)
+        if (_closing) return;
+        _closing = true;
+        _tray.Visible = false;
+        try
+        {
+            if (_receiver is not null) await _receiver.StopAsync();
+        }
+        catch (Exception error)
+        {
+            System.Diagnostics.Debug.WriteLine($"CrossMouse shutdown: {error.Message}");
+        }
+        Close();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (!_closing && e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
-            _closing = true;
-            _tray.Visible = false;
-            if (_receiver is not null)
-            {
-                try { await _receiver.StopAsync(); }
-                catch (Exception error)
-                {
-                    // Never keep the GUI open with an invisible input server
-                    // merely because shutdown hit a network exception.
-                    System.Diagnostics.Debug.WriteLine($"CrossMouse shutdown: {error.Message}");
-                }
-            }
-            // Stop is completed before the real window is destroyed.
-            Close();
+            Hide();
             return;
         }
+        // Session shutdown isn't an ordinary user close: let Windows exit.
+        // Explicit Exit has already awaited the receiver's cleanup.
+        _receiver?.SetSmoothingEnabled(false);
         base.OnFormClosing(e);
     }
 }
