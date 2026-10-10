@@ -13,7 +13,7 @@ final class MacConnection: @unchecked Sendable {
     private let onMessage: @Sendable (CrossMouseMessage) -> Void
     private let queue = DispatchQueue(label: "CrossMouse.connection")
     private var connection: NWConnection?
-    private var buffer = Data()
+    private var buffer = FramedByteBuffer()
     private var clientNonce = Data()
     private var sessionKey: Data?
     private var sendSequence: UInt64 = 0
@@ -67,7 +67,7 @@ final class MacConnection: @unchecked Sendable {
         guard !stopped, connection == nil, let endpointPort = NWEndpoint.Port(rawValue: port) else {
             return
         }
-        buffer = Data()
+        buffer = FramedByteBuffer()
         clientNonce = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
         sessionKey = nil
         sendSequence = 0
@@ -101,8 +101,8 @@ final class MacConnection: @unchecked Sendable {
     private func receive(_ socket: NWConnection) {
         socket.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self, weak socket] data, _, complete, error in
             guard let self, let socket, self.connection === socket else { return }
-            if let data { self.buffer.append(data) }
             do {
+                if let data { try self.buffer.append(data) }
                 try self.processBuffer()
             } catch {
                 NSLog("CrossMouse: rejected connection: %@", String(describing: error))
@@ -119,9 +119,7 @@ final class MacConnection: @unchecked Sendable {
 
     private func processBuffer() throws {
         if sessionKey == nil {
-            guard buffer.count >= CrossMouseWire.helloLength else { return }
-            let hello = Data(buffer.prefix(CrossMouseWire.helloLength))
-            buffer.removeFirst(CrossMouseWire.helloLength)
+            guard let hello = buffer.take(CrossMouseWire.helloLength) else { return }
             let serverNonce = try CrossMouseWire.verifyServerHello(
                 hello, secret: secret, clientNonce: clientNonce
             )
@@ -131,15 +129,7 @@ final class MacConnection: @unchecked Sendable {
             onConnected(true)
         }
 
-        while buffer.count >= 4 {
-            let length = buffer.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            guard length >= 16, length <= CrossMouseWire.maxFrameLength else {
-                throw CrossMouseError.invalidFrame
-            }
-            let total = Int(length) + 4
-            guard buffer.count >= total else { return }
-            let ciphertext = Data(buffer[4..<total])
-            buffer.removeFirst(total)
+        while let ciphertext = try buffer.takeEncryptedFrame() {
             guard let key = sessionKey else { throw CrossMouseError.invalidHandshake }
             let message = try CrossMouseWire.open(
                 ciphertext, sessionKey: key,
@@ -147,10 +137,6 @@ final class MacConnection: @unchecked Sendable {
             )
             receiveSequence += 1
             onMessage(message)
-        }
-        // Do not allow arbitrary unbounded buffering while waiting on a frame.
-        if buffer.count > CrossMouseWire.maxFrameLength + 4 {
-            throw CrossMouseError.invalidFrame
         }
     }
 
@@ -160,7 +146,7 @@ final class MacConnection: @unchecked Sendable {
         connection?.cancel()
         connection = nil
         sessionKey = nil
-        buffer = Data()
+        buffer = FramedByteBuffer()
         if wasConnected { onConnected(false) }
         guard !stopped else { return }
         queue.asyncAfter(deadline: .now() + .seconds(2)) { [weak self] in

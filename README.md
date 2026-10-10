@@ -69,6 +69,10 @@ open dist/CrossMouseMac.app
 
 macOS 15 이상에서는 **로컬 네트워크** 접근도 허용해야 합니다. 시스템이 CrossMouse의 로컬 네트워크 접근을 묻는다면 허용하세요. 팝업을 놓쳤다면 **시스템 설정 → 개인정보 보호 및 보안 → 로컬 네트워크**에서 CrossMouse를 확인합니다. 또한 원격 도구·IDE가 실행하는 `ping`이나 `nc`가 macOS의 *그 도구에 대한* 로컬 네트워크 권한 때문에 `No route to host`를 반환할 수 있습니다. 이런 경우 실제 Mac의 **Terminal.app**에서 `nc -G 3 -vz <windows-ip> 49431`를 별도로 확인하세요. 이를 이유로 Windows 방화벽이나 공유기 보안을 무조건 해제하지 마세요.
 
+**앱을 새로 빌드한 직후 권한이 풀린 경우:** 이 로컬 앱은 개발용 ad-hoc 서명으로 빌드되며 바이너리 갱신 시 macOS가 다시 손쉬운 사용 권한 승인을 요구할 수 있습니다. 메뉴의 `Input capture unavailable: Accessibility not granted` 또는 `Input Monitoring not granted`를 보면 **시스템 설정 → 개인정보 보호 및 보안 → 기기 제어 및 데이터 접근**(macOS 버전에 따라 손쉬운 사용/입력 모니터링)에서 CrossMouseMac의 권한을 다시 확인하고, 메뉴의 **Retry input capture**를 선택하세요. 단순히 `Connected to Windows`인 것만으로 마우스 입력 감지가 동작한다는 뜻은 아닙니다.
+
+CrossMouse 메뉴의 **Input capture installed**와 **Entered Windows (attempt N)** 항목으로 입력 감지와 화면 경계 인식을 각각 확인할 수 있습니다. 진단에는 키 입력 내용이 저장되지 않습니다.
+
 터미널에서 직접 실행할 수도 있습니다:
 
 ```bash
@@ -96,6 +100,7 @@ Mac **Command**는 Windows **Ctrl**로, Mac **Control**은 Windows **Win** 키�
 - 최초 연결 시 양쪽에 저장된 **256비트 공유 페어링 키**로 HMAC-SHA256 상호 인증합니다.
 - 연결마다 양쪽의 128비트 랜덤 nonce로 키를 파생하고, 마우스/키보드 이벤트는 **AES-256-GCM**으로 암호화하고 무결성을 검증합니다. 통신 자체는 로컬 LAN에서만 작동하며 클라우드 서버가 없습니다.
 - Windows는 인증에 성공한 연결이 `enter` 메시지를 전달했을 때만 OS에 입력을 실행합니다.
+- Mac에서는 수신 버퍼에서 인증 응답을 소비한 직후 들어오는 복귀 메시지로 앱이 종료되던 바이트 인덱스 문제를 수정했고, 핸드셰이크+암호화 프레임 병합 및 모든 분할 경계 검사를 추가했습니다.
 - Windows 수신기는 연결이 끊기거나 Mac으로 복귀하면 눌린 키와 마우스 버튼을 해제합니다. Mac도 연결이 끊기면 로컬 입력 모드로 돌아옵니다.
 - 공개 Wi-Fi에 수신 포트를 열지 마세요. 페어링 키를 다른 사람에게 전달하지 마세요. macOS 권한은 사용자가 직접 허용해야 합니다.
 - Windows UAC 보안 데스크톱이나 관리자 권한 앱으로의 입력, macOS 보안 입력(Secure Input), OS/키보드 설정에 따른 미지원 키는 별도로 제한됩니다.

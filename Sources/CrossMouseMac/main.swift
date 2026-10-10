@@ -71,9 +71,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var readyItem: NSMenuItem!
     private var statusLine: NSMenuItem!
+    private var captureLine: NSMenuItem!
+    private var transferLine: NSMenuItem!
     private var eventTap: CFMachPort?
     private var displayID: CGDirectDisplayID = 0
     private var displayBounds: CGRect = .zero
+    private var transferAttempts = 0
+    private var lastTransfer = "No handoff attempted yet"
 
     init(options: Options) {
         self.options = options
@@ -102,7 +106,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             },
             onMessage: { [weak self] message in
                 if message.type == "leave" {
-                    DispatchQueue.main.async { self?.reclaimMac() }
+                    DispatchQueue.main.async {
+                        self?.lastTransfer = "Windows requested return to Mac"
+                        self?.reclaimMac()
+                        self?.updateMenu()
+                    }
                 }
             }
         )
@@ -125,6 +133,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         statusLine = NSMenuItem(title: "Disconnected", action: nil, keyEquivalent: "")
         statusLine.isEnabled = false
         menu.addItem(statusLine)
+        captureLine = NSMenuItem(title: "Input capture: checking", action: nil, keyEquivalent: "")
+        captureLine.isEnabled = false
+        menu.addItem(captureLine)
+        transferLine = NSMenuItem(title: "No handoff attempted yet", action: nil, keyEquivalent: "")
+        transferLine.isEnabled = false
+        menu.addItem(transferLine)
         menu.addItem(.separator())
         readyItem = NSMenuItem(
             title: "Windows on right edge", action: #selector(toggleReady), keyEquivalent: ""
@@ -141,6 +155,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         let help = NSMenuItem(title: "Emergency return: Ctrl+Option+Shift+Esc", action: nil, keyEquivalent: "")
         help.isEnabled = false
         menu.addItem(help)
+        let retry = NSMenuItem(title: "Retry input capture", action: #selector(retryInputCapture), keyEquivalent: "")
+        retry.target = self
+        menu.addItem(retry)
+        let settings = NSMenuItem(title: "Open input permission settings", action: #selector(openInputSettings), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
         let quit = NSMenuItem(title: "Quit CrossMouse", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -162,8 +182,29 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
+    @objc private func retryInputCapture() {
+        if eventTap == nil { installEventTap() }
+        updateMenu()
+    }
+
+    @objc private func openInputSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private func updateMenu() {
         statusLine.title = connected ? (remoteActive ? "Windows is controlling" : "Connected to Windows") : "Windows disconnected"
+        if eventTap != nil {
+            captureLine.title = "Input capture installed"
+        } else if !AXIsProcessTrusted() {
+            captureLine.title = "Input capture unavailable: Accessibility not granted"
+        } else if !CGPreflightListenEventAccess() {
+            captureLine.title = "Input capture unavailable: Input Monitoring not granted"
+        } else {
+            captureLine.title = "Input capture unavailable: retry or restart app"
+        }
+        transferLine.title = lastTransfer
         readyItem.state = windowsReady ? .on : .off
         statusItem.button?.title = remoteActive ? "⇆ W" : "⇆"
     }
@@ -182,8 +223,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func installEventTap() {
+        guard eventTap == nil else { return }
         if !AXIsProcessTrusted() {
             NSLog("CrossMouse: Accessibility permission is required. Grant it in System Settings and restart.")
+        }
+        if !CGPreflightListenEventAccess() {
+            NSLog("CrossMouse: Input Monitoring permission is required. Grant it in System Settings and restart.")
         }
         let types: [CGEventType] = [
             .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
@@ -205,6 +250,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, CFRunLoopMode.commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        updateMenu()
     }
 
     private func forceReturn() {
@@ -248,8 +294,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             if type == .mouseMoved,
                event.location.y >= displayBounds.minY,
                event.location.y < displayBounds.maxY,
-               event.location.x >= displayBounds.maxX - 3 {
+               event.location.x >= displayBounds.maxX - 3,
+               event.getIntegerValueField(.mouseEventDeltaX) > 0 {
                 remoteActive = true
+                transferAttempts += 1
+                lastTransfer = "Entered Windows (attempt \(transferAttempts))"
                 let ratio = min(1, max(0, (event.location.y - displayBounds.minY) / displayBounds.height))
                 network.send(CrossMouseMessage(type: "enter", fractionY: ratio))
                 CGWarpMouseCursorPosition(CGPoint(x: displayBounds.maxX - 5, y: event.location.y))
