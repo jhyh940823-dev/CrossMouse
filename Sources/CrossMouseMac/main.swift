@@ -66,6 +66,10 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var network: MacConnection!
     private var connected = false
     private var connectionWanted = true
+    private var receiverLiveness = ReceiverLiveness()
+    private var heartbeatTimer: Timer?
+    private var receiverResponsive = false
+    private var awaitingEnterAt: TimeInterval?
     private var windowsReady = false
     private var remoteActive = false
     private var pressedModifiers = Set<Int>()
@@ -115,13 +119,45 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             host: options.host, port: options.port, secret: options.key,
             onConnected: { [weak self] value in
                 DispatchQueue.main.async {
-                    self?.connected = value
-                    if !value { self?.reclaimMac() }
-                    self?.updateMenu()
+                    guard let self else { return }
+                    self.connected = value
+                    self.receiverLiveness.reset()
+                    self.receiverResponsive = false
+                    if !value { self.reclaimMac() }
+                    else { self.network.send(CrossMouseMessage(type: "ping")) }
+                    self.updateMenu()
                 }
             },
             onMessage: { [weak self] message in
-                if message.type == "leave" {
+                if message.type == "pong" {
+                    DispatchQueue.main.async {
+                        guard let self, self.connected, self.connectionWanted else { return }
+                        self.receiverLiveness.confirm(
+                            at: ProcessInfo.processInfo.systemUptime
+                        )
+                        if !self.receiverResponsive {
+                            self.receiverResponsive = true
+                            self.updateMenu()
+                        }
+                    }
+                } else if message.type == "entered" {
+                    DispatchQueue.main.async {
+                        guard let self, self.remoteActive,
+                              self.awaitingEnterAt != nil else { return }
+                        self.awaitingEnterAt = nil
+                        self.lastTransfer = "Windows confirmed remote control"
+                        self.updateMenu()
+                    }
+                } else if message.type == "rejected" {
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.reclaimMac()
+                        self.windowsReady = false
+                        self.lastTransfer = "Windows rejected mouse control"
+                        self.monitorStatus = "Windows가 커서 제어를 받지 못했습니다. Windows 앱 상태를 확인하세요."
+                        self.updateMenu()
+                    }
+                } else if message.type == "leave" {
                     DispatchQueue.main.async {
                         guard let self else { return }
                         self.lastTransfer = "Windows requested return to Mac"
@@ -159,6 +195,14 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         }
         RunLoop.main.add(timer, forMode: .common)
         hotCornerTimer = timer
+        // A disconnected/stalled Windows receiver can leave the Mac cursor
+        // parked at the edge. TCP 'connected' isn't a sufficient health check.
+        // Ping periodically and reclaim locally on missing app-level pong.
+        let heartbeat = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkReceiverHeartbeat() }
+        }
+        RunLoop.main.add(heartbeat, forMode: .common)
+        heartbeatTimer = heartbeat
         NSLog("CrossMouse: Mac boundary display ID %u, bounds %@", displayID, NSStringFromRect(displayBounds))
     }
 
@@ -167,6 +211,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         network?.stop()
         reclaimMac()
         hotCornerTimer?.invalidate()
+        heartbeatTimer?.invalidate()
         hotCornerHUD.hide()
         if let eventTap { CFMachPortInvalidate(eventTap) }
     }
@@ -268,6 +313,36 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         updateMenu()
     }
 
+    private func checkReceiverHeartbeat() {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let wasResponsive = receiverResponsive
+        receiverResponsive = connected && connectionWanted
+            && receiverLiveness.isResponsive(at: uptime)
+        let enterTimedOut = remoteActive && (awaitingEnterAt.map {
+            uptime - $0 > 1.5
+        } ?? false)
+        if remoteActive && (!receiverResponsive || enterTimedOut) {
+            // Even if TCP is half-open or the Windows process stopped
+            // consuming events, the Mac MUST release its local cursor.
+            // Disarm automatic re-entry until the user deliberately retries.
+            network.send(CrossMouseMessage(type: "leave"))
+            reclaimMac()
+            windowsReady = false
+            lastTransfer = enterTimedOut
+                ? "Windows entry not acknowledged — safely returned to Mac"
+                : "Windows stopped responding — safely returned to Mac"
+            monitorStatus = enterTimedOut
+                ? "Windows가 커서 진입을 확인하지 않아 Mac으로 복귀했습니다. Windows 앱을 확인하세요."
+                : "Windows 수신기 응답이 없어 Mac 커서를 복구했습니다. Windows 앱을 확인하세요."
+            updateMenu()
+        } else if wasResponsive != receiverResponsive {
+            updateMenu()
+        }
+        if connectionWanted && connected {
+            network.send(CrossMouseMessage(type: "ping"))
+        }
+    }
+
     @objc private func toggleReady() {
         setWindowsMode(!windowsReady)
     }
@@ -333,7 +408,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func tickHotCorner() {
-        guard connectionWanted, connected, !windowsReady, !remoteActive,
+        guard connectionWanted, connected, receiverResponsive, !windowsReady, !remoteActive,
               autoInputSwitch, verifiedHDMI, verifiedDVI, !ddcBusy,
               let philips = NSScreen.screens.first(where: {
                   $0.localizedName.localizedCaseInsensitiveContains("PHL 271E1")
@@ -371,7 +446,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 self.ddcBusy = false
                 switch result {
                 case .success:
-                    guard self.connected, self.connectionWanted else {
+                    guard self.connected, self.connectionWanted, self.receiverResponsive else {
                         self.monitorStatus = "모니터 명령을 보냈으나 Windows 연결이 끊겼습니다."
                         self.updateMenu()
                         return
@@ -392,7 +467,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func enterWindowsAfterHotCorner(fractionY: Double) {
-        guard !remoteActive, connected, windowsReady else { return }
+        guard !remoteActive, connected, receiverResponsive, windowsReady else { return }
         let anchor = CGPoint(
             x: displayBounds.maxX - 5,
             y: displayBounds.minY + displayBounds.height * fractionY
@@ -403,6 +478,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         }
         remoteCursorAnchor = anchor
         remoteActive = true
+        awaitingEnterAt = ProcessInfo.processInfo.systemUptime
         transferAttempts += 1
         lastTransfer = "Entered Windows via Philips hot corner"
         network.send(CrossMouseMessage(type: "enter", fractionY: fractionY))
@@ -418,9 +494,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             reclaimMac()
             connectionWanted = false
             connected = false
+            receiverLiveness.reset()
+            receiverResponsive = false
             network.stop()
         } else {
             connectionWanted = true
+            receiverLiveness.reset()
+            receiverResponsive = false
             network.start()
         }
         updateMenu()
@@ -448,7 +528,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
 
     private func updateMenu() {
         statusLine.title = !connectionWanted ? "Connection paused" :
-            connected ? (remoteActive ? "Windows is controlling" : "Connected to Windows") :
+            connected ? (!receiverResponsive ? "Windows receiver not responding" :
+                remoteActive ? "Windows is controlling" : "Windows receiver ready") :
             "Windows disconnected"
         if eventTap != nil {
             captureLine.title = "Input capture installed"
@@ -467,6 +548,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         controlWindow?.render(
             connected: connected, connecting: connectionWanted,
             windowsMode: windowsReady, captureStatus: captureLine.title,
+            receiverResponsive: receiverResponsive,
             autoVerified: verifiedHDMI && verifiedDVI, autoEnabled: autoInputSwitch,
             monitorBusy: ddcBusy, monitorStatus: monitorStatus
         )
@@ -525,6 +607,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func reclaimMac() {
+        awaitingEnterAt = nil
         guard remoteActive else { return }
         remoteActive = false
         remoteCursorAnchor = nil
@@ -558,7 +641,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        guard connectionWanted, connected, windowsReady else {
+        guard connectionWanted, connected, receiverResponsive, windowsReady else {
             return Unmanaged.passUnretained(event)
         }
         if !remoteActive {
@@ -584,6 +667,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     return Unmanaged.passUnretained(event)
                 }
                 remoteActive = true
+                awaitingEnterAt = ProcessInfo.processInfo.systemUptime
                 transferAttempts += 1
                 lastTransfer = "Entered Windows (attempt \(transferAttempts))"
                 remoteCursorAnchor = anchor

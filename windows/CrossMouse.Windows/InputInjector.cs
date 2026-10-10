@@ -94,8 +94,10 @@ internal sealed class InputInjector
                 var fraction = Math.Clamp(message.FractionY ?? 0.5, 0.0, 1.0);
                 int x = desktop.Left + Math.Min(64, Math.Max(8, desktop.Width / 8));
                 int y = desktop.Top + (int)Math.Round((desktop.Height - 1) * fraction);
-                Native.SetCursorPos(x, y);
-                _remoteActive = true;
+                // A hidden/locked Windows session can reject cursor
+                // injection. Never tell Mac that Windows took control if
+                // the initial cursor placement failed.
+                _remoteActive = Native.SetCursorPos(x, y);
                 return;
             }
             if (message.Type == "leave")

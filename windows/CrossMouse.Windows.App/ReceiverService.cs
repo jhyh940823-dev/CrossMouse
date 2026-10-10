@@ -135,7 +135,29 @@ internal sealed class ReceiverService : IAsyncDisposable
                         while (!sessionCancel.IsCancellationRequested)
                         {
                             var message = await channel.ReadAsync(sessionCancel.Token);
+                            // A TCP connection can look alive long after
+                            // WinForms is hidden or a receiver stops
+                            // processing messages. Prove the actual receiver
+                            // loop is alive before Mac suppresses its cursor.
+                            if (message.Type == "ping")
+                            {
+                                await channel.SendAsync(
+                                    new MouseMessage { Type = "pong" },
+                                    sessionCancel.Token
+                                );
+                                continue;
+                            }
                             _injector.Apply(message);
+                            if (message.Type == "enter")
+                            {
+                                // Mac must never remain parked waiting for a
+                                // Windows receiver that didn't actually enter
+                                // remote mouse mode.
+                                await channel.SendAsync(new MouseMessage
+                                {
+                                    Type = _injector.IsRemotelyActive ? "entered" : "rejected"
+                                }, sessionCancel.Token);
+                            }
                         }
                     }
                     finally

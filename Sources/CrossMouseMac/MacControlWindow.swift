@@ -125,16 +125,21 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     }
 
     func render(connected: Bool, connecting: Bool, windowsMode: Bool,
-                captureStatus: String, autoVerified: Bool = false,
+                captureStatus: String, receiverResponsive: Bool = false,
+                autoVerified: Bool = false,
                 autoEnabled: Bool = false, monitorBusy: Bool = false,
                 monitorStatus: String = "") {
         macButton.state = windowsMode ? .off : .on
         windowsButton.state = windowsMode ? .on : .off
         statusLabel.stringValue = !connecting ? "Windows 연결 중지됨" :
-            connected ? "Windows에 연결됨" : "Windows 연결 대기 중…"
+            connected ? (receiverResponsive ? "Windows 수신기 정상 응답 · 연결됨" :
+                "TCP 연결됨 · Windows 수신기 응답 없음 (Windows 앱 버전 확인)") :
+                "Windows 연결 대기 중…"
         connectionButton.title = connecting ? "연결 중지" : "연결 시작"
         modeDescription.stringValue = windowsMode
-            ? "삼성 오른쪽 끝 → 필립스 Windows, 왼쪽 끝 → Mac 복귀"
+            ? (receiverResponsive
+                ? "삼성 오른쪽 끝 → 필립스 Windows, 왼쪽 끝 → Mac 복귀"
+                : "안전 대기: Windows 앱이 응답할 때까지 마우스 전환이 차단됩니다.")
             : "Mac 듀얼 화면: 삼성에서 필립스로 커서가 정상 이동합니다."
         diagnosticsLabel.stringValue = captureStatus
         ddcTestButton.isEnabled = !monitorBusy

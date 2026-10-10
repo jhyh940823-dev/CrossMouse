@@ -85,6 +85,20 @@ internal static class Program
                         await Task.Delay(10, timeout.Token);
                     if (!window.RemoteActiveForTest)
                         throw new Exception("Receiver did not enter remote mouse mode.");
+                    await CheckReceiverMessage(
+                        stream, sessionKey, sequence: 0, expectedType: "entered",
+                        timeout.Token
+                    );
+
+                    // Even while a remote mouse is active, an authenticated
+                    // application-level heartbeat must be processed by the
+                    // input receiver itself. This detects a hung receiver
+                    // that still owns an apparently healthy TCP socket.
+                    await stream.WriteAsync(WireProtocol.Encrypt(
+                        new MouseMessage { Type = "ping" }, sessionKey,
+                        sequence: 1, fromMac: true
+                    ), timeout.Token);
+                    await CheckPong(stream, sessionKey, sequence: 1, timeout.Token);
 
                     // X must hide the window and RELEASE the captured Mac
                     // input, while keeping the server accepting connections.
@@ -100,7 +114,7 @@ internal static class Program
                     var payload = new byte[length];
                     await stream.ReadExactlyAsync(payload, timeout.Token);
                     var returned = WireProtocol.Decrypt(
-                        payload, sessionKey, sequence: 0, fromMac: false
+                        payload, sessionKey, sequence: 2, fromMac: false
                     );
                     if (returned.Type != "leave" || window.RemoteActiveForTest)
                         throw new Exception("X did not send authenticated leave and free Mac.");
@@ -110,13 +124,22 @@ internal static class Program
                     // the RESTORED window from within another active session.
                     var enterAgain = WireProtocol.Encrypt(
                         new MouseMessage { Type = "enter", FractionY = 0.5 },
-                        sessionKey, sequence: 1, fromMac: true
+                        sessionKey, sequence: 2, fromMac: true
                     );
                     await stream.WriteAsync(enterAgain, timeout.Token);
                     for (int i = 0; i < 100 && !window.RemoteActiveForTest; i++)
                         await Task.Delay(10, timeout.Token);
                     if (!window.RemoteActiveForTest)
                         throw new Exception("Hidden Windows app could not re-enter mouse mode.");
+                    await CheckReceiverMessage(
+                        stream, sessionKey, sequence: 3, expectedType: "entered",
+                        timeout.Token
+                    );
+                    await stream.WriteAsync(WireProtocol.Encrypt(
+                        new MouseMessage { Type = "ping" }, sessionKey,
+                        sequence: 3, fromMac: true
+                    ), timeout.Token);
+                    await CheckPong(stream, sessionKey, sequence: 4, timeout.Token);
                     window.RestoreForTest();
                     if (!window.Visible || window.IsDisposed)
                         throw new Exception("The tray could not restore the GUI window.");
@@ -131,7 +154,7 @@ internal static class Program
                     payload = new byte[length];
                     await stream.ReadExactlyAsync(payload, timeout.Token);
                     returned = WireProtocol.Decrypt(
-                        payload, sessionKey, sequence: 1, fromMac: false
+                        payload, sessionKey, sequence: 5, fromMac: false
                     );
                     if (returned.Type != "leave" || window.RemoteActiveForTest)
                         throw new Exception("Closing restored GUI did not free Mac input.");
@@ -154,7 +177,7 @@ internal static class Program
                 if (window.ReceiverRunningForTest || closedEvents != 1)
                     throw new Exception("Explicit Exit did not shut down the receiver.");
                 result = 0;
-                Console.WriteLine("PASS GUI active-remote X returns Mac, receiver alive, restore, Exit");
+                Console.WriteLine("PASS GUI active-remote X, receiver pong while hidden, restore, Exit");
             }
             catch (Exception error)
             {
@@ -198,7 +221,39 @@ internal static class Program
         await stream.WriteAsync(WireProtocol.ClientHello(secret, nonce), timeout.Token);
         byte[] hello = new byte[WireProtocol.HelloLength];
         await stream.ReadExactlyAsync(hello, timeout.Token);
-        if (!WireProtocol.VerifyServerHello(hello, secret, nonce, out _))
+        if (!WireProtocol.VerifyServerHello(hello, secret, nonce, out var serverNonce))
             throw new Exception("Receiver handshake was not authenticated.");
+        var sessionKey = WireProtocol.SessionKey(secret, nonce, serverNonce);
+        await stream.WriteAsync(WireProtocol.Encrypt(
+            new MouseMessage { Type = "ping" },
+            sessionKey, sequence: 0, fromMac: true
+        ), timeout.Token);
+        await CheckPong(stream, sessionKey, sequence: 0, timeout.Token);
+    }
+
+    private static Task CheckPong(
+        NetworkStream stream, byte[] sessionKey, ulong sequence,
+        CancellationToken cancellationToken
+    ) => CheckReceiverMessage(
+        stream, sessionKey, sequence, expectedType: "pong", cancellationToken
+    );
+
+    private static async Task CheckReceiverMessage(
+        NetworkStream stream, byte[] sessionKey, ulong sequence,
+        string expectedType, CancellationToken cancellationToken
+    )
+    {
+        var header = new byte[4];
+        await stream.ReadExactlyAsync(header, cancellationToken);
+        int length = BinaryPrimitives.ReadInt32BigEndian(header);
+        if (length < 16 || length > WireProtocol.MaxFrameLength)
+            throw new Exception("Receiver heartbeat frame size invalid.");
+        var payload = new byte[length];
+        await stream.ReadExactlyAsync(payload, cancellationToken);
+        var message = WireProtocol.Decrypt(
+            payload, sessionKey, sequence, fromMac: false
+        );
+        if (message.Type != expectedType)
+            throw new Exception($"Windows receiver replied {message.Type}, expected {expectedType}.");
     }
 }

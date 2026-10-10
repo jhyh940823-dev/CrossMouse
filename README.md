@@ -1,5 +1,20 @@
 # CrossMouse
 
+## v0.3.3 — Windows 수신기 응답 확인·Mac 커서 갇힘 방지
+
+실제 사용 중 Windows 앱을 X로 숨긴 뒤 Mac 커서가 Windows로 넘어가지 못하거나, Mac이 커서를 오른쪽 끝에 고정했는데 Windows가 반응하지 않는 문제가 보고됐습니다. 원격 수신기 TCP가 연결됐다고 표시되는 것만으로 실제 입력 처리 가능 여부가 보장되지 않습니다.
+
+**v0.3.3부터 Mac/Windows 양쪽 앱을 함께 업데이트해야 합니다.**
+
+- Windows 수신기가 Mac의 암호화된 `ping`에 실제로 응답하는 `pong` 지원. Mac은 새 앱이 2.5초 내에 응답하지 않으면 Windows 모드를 해제하고 Mac 커서를 복구합니다. 응답이 없는 수신기에서는 처음부터 Mac 입력 가로채기를 시작하지 않습니다.
+- 오른쪽 경계에서 Mac이 `enter`를 보낸 뒤 Windows 수신기가 실제로 `SetCursorPos`로 제어권을 받을 수 있을 때만 `entered` 확인을 보냅니다. 1.5초 내 확인이 없으면 Mac이 로컬 커서를 복구하고 자동 재진입을 중지합니다.
+- Windows X 버튼을 누르면 창만 트레이로 숨기고, 현재 Windows를 조작 중이었다면 암호화된 `leave`로 Mac 커서를 먼저 돌려주는 안전 동작(v0.3.2)을 유지합니다. 숨겨진 상태에서도 `ping/pong`와 `enter/entered`가 계속 작동해야 합니다.
+- Mac 상태는 이제 실제 수신기 상태를 구별해 **`Windows 수신기 정상 응답 · 연결됨`** 또는 **`TCP 연결됨 · Windows 수신기 응답 없음`**으로 표시합니다. 응답이 없을 때는 Windows가 여전히 켜졌더라도 Mac 마우스를 잡아두지 않습니다.
+
+**교체 순서:** Mac 버전은 기존 권한이 유지되는 서명으로 빌드해 실행하고, Windows PC에서는 기존 CrossMouse를 작업 표시줄 숨겨진 아이콘에서 `완전 종료`한 뒤 GitHub의 최신 `CrossMouse-Windows-GUI` ZIP 압축을 풀고 새 `CrossMouse.exe`를 실행하세요. Windows GUI 상단에 `v0.3.3`이 표시돼야 합니다. Mac에서 정상 응답이 확인되면 `Windows 사용 (HDMI)` 모드를 선택하고 삼성 오른쪽 끝으로 이동해 실제 전환을 확인하세요.
+
+Mac 비상 복귀: **Control+Option+Shift+Escape**. 기존 Windows v0.3.2나 그 이전 실행 파일은 ping/pong과 entered를 보내지 못하므로 v0.3.3 Mac이 안전하게 전환을 막습니다. **Windows 실제 기기에서 최종 작동 확인은 아직 필요합니다.**
+
 ## Windows v0.3.2 — X 버튼을 누르면 Mac 커서 안전 복귀
 
 Windows GUI의 `X` 버튼을 Mac에서 전달한 마우스로 누를 때 커서가 Windows에 갇히는 실기기 문제가 보고되었습니다. 연결 유지만 시험했던 v0.3.1 테스트는 이 상황을 재현하지 못했습니다.
