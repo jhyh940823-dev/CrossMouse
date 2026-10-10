@@ -31,6 +31,7 @@ jobs:
       - name: Build Windows input receiver
         run: dotnet build windows/CrossMouse.Windows/CrossMouse.Windows.csproj -c Release
       - name: Build Windows desktop GUI
+        id: build_gui
         run: dotnet build windows/CrossMouse.Windows.App/CrossMouse.Windows.App.csproj -c Release
       - name: Windows GUI receiver start/handshake/stop smoke test
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --service-self-test
@@ -39,6 +40,14 @@ jobs:
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --gui-self-test
       - name: Protocol self-tests
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows -- --self-test
+      - name: Receiver must progress without the UI message loop
+        if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
+        timeout-minutes: 2
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --receiver-ui-independence-test
+      - name: Actual encrypted mouse down-up on native X, hidden re-entry
+        if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
+        timeout-minutes: 2
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --remote-caption-test
       - name: Publish Windows standalone receiver
         run: dotnet publish windows/CrossMouse.Windows -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/windows
       - uses: actions/upload-artifact@v4

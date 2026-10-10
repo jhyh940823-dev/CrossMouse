@@ -30,6 +30,10 @@ internal static class Program
             }
         }
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--receiver-ui-independence-test"))
+            return RemoteInputRegression.Run(clickCaption: false);
+        if (args.Contains("--remote-caption-test"))
+            return RemoteInputRegression.Run(clickCaption: true);
         if (args.Contains("--gui-self-test"))
             return GuiLifetimeSelfTest();
         Application.Run(new CrossMouseWindow());
