@@ -25,6 +25,10 @@ internal sealed class ReceiverService : IAsyncDisposable
     private CancellationTokenSource? _cancel;
     private Task? _loop;
     private const string HandoffCapability = "handoff-2";
+    // Mac sends an authenticated heartbeat every 500ms even when the mouse is
+    // stationary. Bound ownership by peer liveness, not by cursor movement or
+    // TCP's potentially very long half-open connection detection.
+    private static readonly TimeSpan PeerSilenceLimit = TimeSpan.FromSeconds(5);
     private readonly object _handoff = new();
     private string? _preparedId, _activeId;
     private TargetDisplay? _target;
@@ -154,6 +158,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                     StatusChanged?.Invoke(ReceiverState.Connected, "Mac 연결됨 · 입력 공유 준비됨");
                     using var sessionCancel =
                         CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    sessionCancel.CancelAfter(PeerSilenceLimit);
                     var returnPoll = CheckLeftBoundaryAsync(channel, sessionCancel.Token);
                     var render = RenderMouseAsync(sessionCancel.Token);
                     // A failed render worker must release the authenticated
@@ -166,6 +171,10 @@ internal sealed class ReceiverService : IAsyncDisposable
                         while (!sessionCancel.IsCancellationRequested)
                         {
                             var message = await channel.ReadAsync(sessionCancel.Token).ConfigureAwait(false);
+                            // SecureChannel returns only after a complete frame
+                            // has been authenticated. Raw bytes, an incomplete
+                            // header/body or corrupted ciphertext never renew it.
+                            sessionCancel.CancelAfter(PeerSilenceLimit);
                             // A TCP connection can look alive long after
                             // WinForms is hidden or a receiver stops
                             // processing messages. Prove the actual receiver
