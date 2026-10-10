@@ -252,6 +252,13 @@ internal static class RemoteInputRegression
             await _client.GetStream().WriteAsync(frame, token).ConfigureAwait(false);
         }
 
+        internal async Task WriteIncompleteFrameForTestAsync(CancellationToken token)
+        {
+            // Claim a 64-byte encrypted body but send only one byte. The
+            // production peer never uses this deliberately malformed fixture.
+            await _client.GetStream().WriteAsync(new byte[] { 0, 0, 0, 64, 0 }, token).ConfigureAwait(false);
+        }
+
         internal async Task ExpectAsync(string type, CancellationToken token)
         {
             var reply = await ReadAsync(token).ConfigureAwait(false);
