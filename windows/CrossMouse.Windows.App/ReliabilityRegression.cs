@@ -13,6 +13,10 @@ internal static class ReliabilityRegression
         {
             CheckMotion(); CheckRasters();
             Console.WriteLine("PASS source-timed motion, cursor opacity/hotspots/resources and fallback");
+            // The owned-profile browser fixture is CI-only. Ordinary local
+            // diagnostics never inspect, attach to or launch a user browser.
+            if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true")
+                Require(ChromePointerRegression.Run() == 0, "Real Chrome pointer composition failed.");
             return 0;
         }
         catch (Exception error) { Console.Error.WriteLine($"FAIL reliability: {error}"); return 1; }
