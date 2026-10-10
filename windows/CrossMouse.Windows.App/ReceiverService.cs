@@ -348,13 +348,13 @@ internal sealed class ReceiverService : IAsyncDisposable
                 try
                 {
                     var target = TargetDisplay.Resolve();
-                    // Wake the pointer/display BEFORE Mac changes the video input.
-                    // Do not acquire keyboard/mouse ownership at this stage.
-                    if (!Native.WakePointerAt(target.Bounds.Left + target.Bounds.Width / 2,
-                        target.Bounds.Top + target.Bounds.Height / 2)) throw new IOException("pointer-wake-failed");
                     lock (_handoff)
                     {
                         if (_preparedId != id || token.IsCancellationRequested) return;
+                        // Resolve can outlive cancellation. Recheck ownership
+                        // BEFORE any OS side effect, not just before replying.
+                        if (!Native.WakePointerAt(target.Bounds.Left + target.Bounds.Width / 2,
+                            target.Bounds.Top + target.Bounds.Height / 2)) throw new IOException("pointer-wake-failed");
                         _target = target;
                     }
                     await channel.SendAsync(new MouseMessage { Type = "prepared", TransferId = id,
@@ -384,7 +384,7 @@ internal sealed class ReceiverService : IAsyncDisposable
         lock (_handoff)
         {
             if (_preparedId != request.TransferId || _target is null || _activeId is not null) return;
-            var target = _target;
+            var preparedTarget = _target;
             string id = request.TransferId!;
             _activationCancel!.CancelAfter(TimeSpan.FromSeconds(7));
             var token = _activationCancel!.Token;
@@ -392,6 +392,13 @@ internal sealed class ReceiverService : IAsyncDisposable
             {
                 try
                 {
+                    // HDMI switching may recreate the monitor handle or move
+                    // its bounds. Preparation's geometry is not a readiness
+                    // fact; resolve the actual target again after the command.
+                    var target = TargetDisplay.Resolve();
+                    if (preparedTarget.Name.Contains("271E1", StringComparison.OrdinalIgnoreCase) &&
+                        !target.Name.Contains("271E1", StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("prepared-target-no-longer-available");
                     uint? source;
                     // Observe the monitor's actual input when it supports VCP reads.
                     // Unsupported is reported, not silently treated as verified HDMI.

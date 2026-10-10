@@ -35,6 +35,8 @@ internal static class HandoffRegression
             await peer.SendAsync(new MouseMessage { Type="ping" }, token); await peer.ExpectAsync("pong", token);
             await Prepare(peer, current, token);
             Require(!receiver.IsRemotelyActive, "second preparation captured input");
+            await peer.SendAsync(new MouseMessage { Type="leave" }, token);
+            await peer.SendAsync(new MouseMessage { Type="ping" }, token); await peer.ExpectAsync("pong", token);
             await peer.SendAsync(new MouseMessage { Type="enter", TransferId=current, CenterCursor=true }, token);
             var entered = await peer.ReadAsync(token);
             Require(entered.Type == "entered" && entered.TransferId == current && entered.PointerVisible == true,
