@@ -152,6 +152,11 @@ internal sealed class ReceiverService : IAsyncDisposable
                         CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     var returnPoll = CheckLeftBoundaryAsync(channel, sessionCancel.Token);
                     var render = RenderMouseAsync(sessionCancel.Token);
+                    // A failed render worker must release the authenticated
+                    // session, not leave an apparently live but frozen cursor.
+                    _ = render.ContinueWith(_ => sessionCancel.Cancel(), CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
                     try
                     {
                         while (!sessionCancel.IsCancellationRequested)
@@ -296,33 +301,30 @@ internal sealed class ReceiverService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Renders the cursor at ~125Hz instead of teleporting it whenever a TCP
-    /// message happens to arrive. High-resolution timer mode is requested only
-    /// while Windows actually has the input focus.
+    /// A single render clock drives both cursor calculation and the optional
+    /// visible surface. No independent Forms timer samples it at a lower rate.
+    /// Waiting sleeps on a kernel event; it does not spin or run on the UI.
     /// </summary>
-    private async Task RenderMouseAsync(CancellationToken cancellationToken)
+    private Task RenderMouseAsync(CancellationToken cancellationToken) => Task.Factory.StartNew(() =>
     {
-        HighResolutionTimer? resolution = null;
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(8));
+        using var clock = new PointerFrameClock();
+        WaitHandle[] handles = [cancellationToken.WaitHandle, clock];
         try
         {
-            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            while (WaitHandle.WaitAny(handles) == 1 && !cancellationToken.IsCancellationRequested)
             {
-                if (_injector.IsRemotelyActive)
-                    resolution ??= HighResolutionTimer.TryBegin();
-                else
-                {
-                    resolution?.Dispose();
-                    resolution = null;
-                }
                 _injector.Tick();
+                Volatile.Read(ref _presenter)?.RequestRefresh();
             }
         }
         finally
         {
-            resolution?.Dispose();
+            // Force one latest-state refresh on cancellation as well. Release
+            // keys/buttons first so a custom pointer does not remain displayed.
+            _injector.ReleaseAll();
+            Volatile.Read(ref _presenter)?.RequestRefresh();
         }
-    }
+    }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
     public async ValueTask DisposeAsync()
     {

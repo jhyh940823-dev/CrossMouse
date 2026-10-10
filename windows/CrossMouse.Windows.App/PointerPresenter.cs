@@ -13,14 +13,16 @@ internal sealed class PointerPresenter : IDisposable
     private readonly TaskCompletionSource<Surface> _surface = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Func<bool> _active;
     private int _disposed;
-    internal PointerPresenter(Func<bool> active, bool simulateHiddenNativePointerForTest = false)
+    private int _refreshQueued;
+    internal PointerPresenter(Func<bool> active, bool simulateHiddenNativePointerForTest = false,
+        Action? observedFrameForTest = null)
     {
         _active = active;
         var thread = new Thread(() =>
         {
             try
             {
-                using var surface = new Surface(_active, simulateHiddenNativePointerForTest);
+                using var surface = new Surface(_active, simulateHiddenNativePointerForTest, observedFrameForTest);
                 _ = surface.Handle;
                 _surface.TrySetResult(surface);
                 Application.Run(new ApplicationContext());
@@ -29,6 +31,36 @@ internal sealed class PointerPresenter : IDisposable
         }) { IsBackground = true, Name = "CrossMouse.PointerPresentation" };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
+    }
+
+    /// <summary>
+    /// Called AFTER the receiver applies this frame's movement. Queue at most
+    /// one UI callback and read the latest cursor when it runs; never accumulate
+    /// old positions. In particular, the input thread never waits for painting.
+    /// </summary>
+    internal bool RequestRefresh()
+    {
+        if (Volatile.Read(ref _disposed) != 0 || !_surface.Task.IsCompletedSuccessfully ||
+            Interlocked.CompareExchange(ref _refreshQueued, 1, 0) != 0) return false;
+        try
+        {
+            Surface surface = _surface.Task.Result;
+            surface.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    if (Volatile.Read(ref _disposed) == 0 && !surface.IsDisposed)
+                        surface.RefreshPointer();
+                }
+                finally { Volatile.Write(ref _refreshQueued, 0); }
+            }));
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            Volatile.Write(ref _refreshQueued, 0);
+            return false; // presentation thread is already closing
+        }
     }
     internal async Task<bool> VerifyAsync(CancellationToken token)
     {
@@ -60,20 +92,19 @@ internal sealed class PointerPresenter : IDisposable
     private sealed class Surface : Form
     {
         private readonly Func<bool> _active;
-        private readonly System.Windows.Forms.Timer _timer = new() { Interval = 8 };
         private Cursor _pointer = Cursors.Default;
         private nint _cursorHandle;
         private readonly bool _simulateHidden;
-        internal Surface(Func<bool> active, bool simulateHidden)
+        private readonly Action? _observedFrameForTest;
+        internal Surface(Func<bool> active, bool simulateHidden, Action? observedFrameForTest)
         {
             _active = active;
             _simulateHidden = simulateHidden;
+            _observedFrameForTest = observedFrameForTest;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false; TopMost = true;
             BackColor = Color.Magenta; TransparencyKey = Color.Magenta;
             DoubleBuffered = true;
-            _timer.Tick += (_, _) => RefreshPointer();
-            _timer.Start();
         }
         protected override bool ShowWithoutActivation => true;
         protected override CreateParams CreateParams
@@ -83,22 +114,27 @@ internal sealed class PointerPresenter : IDisposable
         internal bool RefreshPointer()
         {
             if (!_active()) { if (Visible) Hide(); return false; }
+            _observedFrameForTest?.Invoke();
             var info = new CursorInfo { Size = Marshal.SizeOf<CursorInfo>() };
             if (!GetCursorInfo(ref info)) { if (Visible) Hide(); return false; }
             if (!_simulateHidden && (info.Flags & 1) != 0) { if (Visible) Hide(); return true; }
-            if (_cursorHandle != info.Cursor)
+            bool cursorChanged = _cursorHandle != info.Cursor;
+            if (cursorChanged)
             {
                 _cursorHandle = info.Cursor;
                 _pointer = info.Cursor != 0 ? new Cursor(info.Cursor) : Cursors.Default;
             }
             var hotspot = _pointer.HotSpot;
-            Bounds = new Rectangle(info.Position.X - hotspot.X, info.Position.Y - hotspot.Y,
+            var next = new Rectangle(info.Position.X - hotspot.X, info.Position.Y - hotspot.Y,
                 _pointer.Size.Width, _pointer.Size.Height);
-            if (!Visible) Show();
-            Invalidate(); Update();
+            if (!Visible || Bounds != next || cursorChanged)
+            {
+                Bounds = next;
+                if (!Visible) Show();
+                Invalidate(); Update();
+            }
             return Visible;
         }
         protected override void OnPaint(PaintEventArgs e) { _pointer.Draw(e.Graphics, ClientRectangle); }
-        protected override void Dispose(bool disposing) { if (disposing) _timer.Dispose(); base.Dispose(disposing); }
     }
 }

@@ -1,5 +1,17 @@
 # CrossMouse
 
+## Windows v0.4.4 — 커서 계산·표시 주기 통합
+
+**Mac v0.4.3은 그대로 사용합니다.** F8/재생키, HDMI 유지 좌우 왕복, DVI 전환, 페어링, 저장된 37% 등의 속도 설정과 이동 보정 수식은 바꾸지 않습니다.
+
+Windows v0.4.0은 좌표를 `PeriodicTimer(8ms)`로 갱신하면서, 기본 커서가 없는 경우의 보조 표시 창은 별도의 `System.Windows.Forms.Timer(8ms)`로 갱신했습니다. 둘은 같은 시계가 아니며 `WM_TIMER`에 8ms를 적어도 실제 8ms 표시를 보장하지 않습니다. Windows 11에서는 숨긴 앱의 `timeBeginPeriod` 요청 역시 높은 해상도를 보장하지 않습니다. 이는 코드에서 확인한 표시 간격의 결함이며, 사용자 기기에서 모든 끊김의 유일한 원인으로 확인한 것은 아닙니다.
+
+이제 대기 가능한 고해상도 타이머가 계산을 진행하고 **계산 직후 동일 주기로 보조 표시를 요청**합니다. 표시 스레드가 늦어져도 최신 좌표를 읽는 요청 하나만 대기하며, 이미 지난 프레임을 줄 세워 재생하지 않습니다. 입력 수신/UI/암호화는 그대로 분리되고 그리기가 끝나기를 입력 스레드가 기다리지 않습니다. 커널 타이머 대기 중에는 스레드가 잠들며 바쁜 대기나 Windows 시스템 설정 변경은 없습니다. 변화 없는 보조 커서를 계속 다시 칠하지 않습니다. 연결 종료는 타이머 대기를 깨우고 표시/입력을 해제합니다.
+
+`--pointer-cadence-test`는 Windows 검사환경에서 이전 Forms 타이머와 새 시계로 구동한 실제 표시 창의 간격을 각각 측정합니다. 측정값은 가상 Windows의 관찰값이고 사용자 모니터의 FPS가 아닙니다. 별도로 느린 표시 스레드에 1,000회 요청해도 하나만 대기하는지, 입력 해제 시 표시가 사라지는지, 대기 중 취소를 확인합니다. 실제 네트워크 지연/패킷 몰림은 별도 원인이 될 수 있으므로 이 수정이 네트워크 끊김까지 없애지는 않습니다.
+
+근거: [SetTimer 최소 주기](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-settimer), [timeBeginPeriod와 숨긴 Windows 앱](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod), [고해상도 대기 타이머](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw).
+
 ## Mac v0.4.3 — F8의 기능키/미디어 입력 경로 구분
 
 v0.4.2는 `keyDown/keyUp`의 표준 F8만 받았습니다. macOS의 재생·일시정지 신호는 별도의 `systemDefined` 이벤트라 기존 이벤트 마스크에 포함되지 않았습니다. v0.4.3은 이 입력도 복귀 키로 처리합니다. HDMI/전환 진행 중에만 적용하고, DVI 상태의 재생 동작과 다른 미디어 키(볼륨·밝기·이전/다음)는 그대로 통과시킵니다. 입력 장치를 식별하는 기능은 아니므로, 같은 재생·일시정지 신호를 보내는 별도 버튼도 HDMI 상태에서는 DVI 복귀로 동작합니다.
