@@ -1,7 +1,9 @@
 using System.Windows.Forms;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using CrossMouse.Windows;
 
@@ -102,7 +104,7 @@ internal static class Program
 
                     // X must hide the window and RELEASE the captured Mac
                     // input, while keeping the server accepting connections.
-                    window.Close();
+                    await CloseWhileInputLockHeldAsync(window, timeout.Token);
                     if (window.Visible || window.IsDisposed || closedEvents != 0 ||
                         !window.ReceiverRunningForTest)
                         throw new Exception("Window X closed or stopped the input receiver.");
@@ -177,7 +179,9 @@ internal static class Program
                 if (window.ReceiverRunningForTest || closedEvents != 1)
                     throw new Exception("Explicit Exit did not shut down the receiver.");
                 result = 0;
-                Console.WriteLine("PASS GUI active-remote X, receiver pong while hidden, restore, Exit");
+                Console.WriteLine(
+                    "PASS GUI active-remote X under input-lock contention, " +
+                    "receiver pong while hidden, restore, Exit");
             }
             catch (Exception error)
             {
@@ -197,6 +201,58 @@ internal static class Program
         watchdog.Start();
         Application.Run(window);
         return result;
+    }
+
+    /// <summary>
+    /// Deterministically reproduces the UI/input lock inversion possible
+    /// when the remote mouse-up dispatches WM_CLOSE while the input worker
+    /// still holds its lock. Old code acquired that lock in OnFormClosing and
+    /// the Windows titlebar would freeze on X.
+    /// </summary>
+    private static async Task CloseWhileInputLockHeldAsync(
+        CrossMouseWindow window, CancellationToken cancellationToken)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var receiver = typeof(CrossMouseWindow).GetField("_receiver", flags)?
+            .GetValue(window) as ReceiverService
+            ?? throw new Exception("GUI lifetime test could not inspect receiver.");
+        var injector = typeof(ReceiverService).GetField("_injector", flags)?
+            .GetValue(receiver)
+            ?? throw new Exception("GUI lifetime test could not inspect injector.");
+        var sync = injector.GetType().GetField("_sync", flags)?.GetValue(injector)
+            ?? throw new Exception("GUI lifetime test could not inspect input lock.");
+
+        var locked = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var unlock = new ManualResetEventSlim(false);
+        var worker = Task.Run(() =>
+        {
+            lock (sync)
+            {
+                locked.TrySetResult();
+                // Timeout guarantees even a buggy UI callback can eventually
+                // unwind and FAIL the test instead of hanging CI indefinitely.
+                unlock.Wait(TimeSpan.FromMilliseconds(1_500));
+            }
+        });
+        try
+        {
+            await locked.Task.WaitAsync(cancellationToken);
+            var stopwatch = Stopwatch.StartNew();
+            window.Close();
+            stopwatch.Stop();
+            if (stopwatch.ElapsedMilliseconds > 650)
+            {
+                throw new Exception(
+                    $"X blocked the GUI waiting for the input lock " +
+                    $"({stopwatch.ElapsedMilliseconds}ms).");
+            }
+        }
+        finally
+        {
+            unlock.Set();
+            await worker;
+        }
     }
 
     private static async Task ServiceSelfTest()

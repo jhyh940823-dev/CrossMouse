@@ -100,11 +100,16 @@ internal sealed class CrossMouseWindow : Form
         _stop.Click += async (_, _) => await StopReceiverAsync();
         _exit.Click += async (_, _) => await QuitAsync();
         _smoothing.CheckedChanged += (_, _) =>
-            _receiver?.SetSmoothingEnabled(_smoothing.Checked);
+        {
+            var receiver = _receiver;
+            bool enabled = _smoothing.Checked;
+            if (receiver is not null)
+                _ = Task.Run(() => receiver.SetSmoothingEnabled(enabled));
+        };
         _motionStats.ForeColor = SystemColors.GrayText;
         _motionStats.MaximumSize = new Size(490, 0);
         _motionStats.AutoSize = true;
-        _statsTimer.Tick += (_, _) => UpdateMouseStats();
+        _statsTimer.Tick += async (_, _) => await UpdateMouseStatsAsync();
         _stop.Enabled = false;
         var copyKey = NewButton("페어링 키 복사");
         copyKey.Click += (_, _) => CopyPairingKey();
@@ -244,9 +249,10 @@ internal sealed class CrossMouseWindow : Form
 
     private async Task StopReceiverAsync()
     {
-        if (_receiver is null || !_receiver.IsRunning) return;
+        var receiver = _receiver;
+        if (receiver is null || !receiver.IsRunning) return;
         _stop.Enabled = false;
-        try { await _receiver.StopAsync(); }
+        try { await Task.Run(receiver.StopAsync); }
         catch (Exception error) { _detail.Text = $"연결 종료 오류: {error.Message}"; }
         _start.Enabled = !_closing;
     }
@@ -265,10 +271,15 @@ internal sealed class CrossMouseWindow : Form
         }
     }
 
-    private void UpdateMouseStats()
+    private async Task UpdateMouseStatsAsync()
     {
-        if (_receiver is null) return;
-        var stats = _receiver.TakeMotionGapStats();
+        // Input injection can synchronously dispatch Windows GUI messages
+        // while holding its lock. The Windows UI must NEVER wait for that
+        // lock, including the stats timer or checkbox callbacks.
+        var receiver = _receiver;
+        if (receiver is null) return;
+        var stats = await Task.Run(receiver.TakeMotionGapStats);
+        if (IsDisposed || Disposing || _closing) return;
         _motionStats.Text = stats.MovePackets == 0
             ? "최근 2초: 마우스 입력 없음"
             : $"최근 2초: 수신 {stats.MovePackets}회 · 25ms 넘는 간격 {stats.GapsOver25Ms}회" +
@@ -310,7 +321,9 @@ internal sealed class CrossMouseWindow : Form
         _tray.Visible = false;
         try
         {
-            if (_receiver is not null) await _receiver.StopAsync();
+            var receiver = _receiver;
+            if (receiver is not null)
+                await Task.Run(receiver.StopAsync);
         }
         catch (Exception error)
         {
@@ -321,23 +334,37 @@ internal sealed class CrossMouseWindow : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // Hide every ordinary Close request without stopping the TCP listener.
-        // When closing from within a remote Mac-controlled session, release
-        // the remote cursor first so the physical mouse cannot get stuck.
+        // This callback runs on the Windows UI thread. The close may have
+        // been triggered by SendInput on the receiver's background thread.
+        // NEVER synchronously acquire InputInjector's lock here: that thread
+        // might be waiting for the UI to process the injected mouse-up, and
+        // taking the same lock here would deadlock both threads at the X.
+        // Cancel and hide first; return the Mac cursor on another thread.
         // Never block actual Windows shutdown or Task Manager termination.
         if (!_closing && e.CloseReason != CloseReason.WindowsShutDown &&
             e.CloseReason != CloseReason.TaskManagerClosing)
         {
             e.Cancel = true;
-            if (_receiver is not null)
-                _ = _receiver.ReturnCursorToMacAsync();
             Hide();
             _tray.Visible = true;
+            var receiver = _receiver;
+            if (receiver is not null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try { await receiver.ReturnCursorToMacAsync().ConfigureAwait(false); }
+                    catch (Exception error)
+                    {
+                        // A failed return must never freeze the UI thread.
+                        System.Diagnostics.Debug.WriteLine(
+                            $"CrossMouse background cursor return: {error.Message}");
+                    }
+                });
+            }
             return;
         }
-        // Session shutdown isn't an ordinary user close: let Windows exit.
-        // Explicit Exit has already awaited the receiver's cleanup.
-        _receiver?.SetSmoothingEnabled(false);
+        // Explicit Exit already released the receiver. Never grab the input
+        // lock on the GUI thread, even during shutdown.
         base.OnFormClosing(e);
     }
 }
