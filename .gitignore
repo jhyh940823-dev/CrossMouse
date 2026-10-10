@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+.DS_Store
+.vs/
+.vscode/
+**/bin/
+**/obj/
+*.user
+*.suo
+*.log
+*.key
+*.secret
+CrossMouse.app/
+dist/

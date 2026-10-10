@@ -1,0 +1,40 @@
+name: CrossMouse Build
+on:
+  push:
+  pull_request:
+
+jobs:
+  mac:
+    name: macOS Swift compile and protocol tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift tests
+        run: swift test
+      - name: Build macOS menu bar application
+        run: |
+          bash scripts/build-mac-app.sh
+          ditto -c -k --keepParent dist/CrossMouseMac.app dist/CrossMouseMac-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossMouse-macOS
+          path: dist/CrossMouseMac-macOS.zip
+
+  windows:
+    name: Windows .NET compile and protocol tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build Windows input receiver
+        run: dotnet build windows/CrossMouse.Windows/CrossMouse.Windows.csproj -c Release
+      - name: Protocol self-tests
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows -- --self-test
+      - name: Publish Windows standalone receiver
+        run: dotnet publish windows/CrossMouse.Windows -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossMouse-Windows-x64
+          path: dist/windows/CrossMouse.Windows.exe
