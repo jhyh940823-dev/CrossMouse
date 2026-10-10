@@ -1,4 +1,5 @@
 using System.Windows.Forms;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -57,13 +58,84 @@ internal static class Program
                 if (!window.ReceiverRunningForTest || window.ListeningPortForTest == 0)
                     throw new Exception("GUI failed to start receiver.");
 
-                // This is equivalent to clicking the window X; the form must
-                // be hidden rather than disposed, and its TCP listener must
-                // still be able to authenticate a new Mac connection.
-                window.Close();
-                if (window.Visible || window.IsDisposed || closedEvents != 0 ||
-                    !window.ReceiverRunningForTest)
-                    throw new Exception("Window X closed or stopped the input receiver.");
+                // Simulate a REAL Mac actively controlling the Windows cursor
+                // and clicking X on the GUI from that remote session. Earlier
+                // CI only checked X while no remote mouse was present, which
+                // missed the user's cursor-trap failure.
+                using (var client = new TcpClient())
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                {
+                    await client.ConnectAsync(
+                        IPAddress.Loopback, window.ListeningPortForTest, timeout.Token
+                    );
+                    var stream = client.GetStream();
+                    var nonce = RandomNumberGenerator.GetBytes(16);
+                    await stream.WriteAsync(WireProtocol.ClientHello(secret, nonce), timeout.Token);
+                    var hello = new byte[WireProtocol.HelloLength];
+                    await stream.ReadExactlyAsync(hello, timeout.Token);
+                    if (!WireProtocol.VerifyServerHello(hello, secret, nonce, out var serverNonce))
+                        throw new Exception("Remote input test handshake failed.");
+                    var sessionKey = WireProtocol.SessionKey(secret, nonce, serverNonce);
+                    var enter = WireProtocol.Encrypt(
+                        new MouseMessage { Type = "enter", FractionY = 0.5 },
+                        sessionKey, sequence: 0, fromMac: true
+                    );
+                    await stream.WriteAsync(enter, timeout.Token);
+                    for (int i = 0; i < 100 && !window.RemoteActiveForTest; i++)
+                        await Task.Delay(10, timeout.Token);
+                    if (!window.RemoteActiveForTest)
+                        throw new Exception("Receiver did not enter remote mouse mode.");
+
+                    // X must hide the window and RELEASE the captured Mac
+                    // input, while keeping the server accepting connections.
+                    window.Close();
+                    if (window.Visible || window.IsDisposed || closedEvents != 0 ||
+                        !window.ReceiverRunningForTest)
+                        throw new Exception("Window X closed or stopped the input receiver.");
+                    var frameSize = new byte[4];
+                    await stream.ReadExactlyAsync(frameSize, timeout.Token);
+                    int length = BinaryPrimitives.ReadInt32BigEndian(frameSize);
+                    if (length < 16 || length > WireProtocol.MaxFrameLength)
+                        throw new Exception("Return-to-Mac frame size invalid.");
+                    var payload = new byte[length];
+                    await stream.ReadExactlyAsync(payload, timeout.Token);
+                    var returned = WireProtocol.Decrypt(
+                        payload, sessionKey, sequence: 0, fromMac: false
+                    );
+                    if (returned.Type != "leave" || window.RemoteActiveForTest)
+                        throw new Exception("X did not send authenticated leave and free Mac.");
+
+                    // The same encrypted session must still be usable while
+                    // the window remains hidden. Re-enter Windows and close
+                    // the RESTORED window from within another active session.
+                    var enterAgain = WireProtocol.Encrypt(
+                        new MouseMessage { Type = "enter", FractionY = 0.5 },
+                        sessionKey, sequence: 1, fromMac: true
+                    );
+                    await stream.WriteAsync(enterAgain, timeout.Token);
+                    for (int i = 0; i < 100 && !window.RemoteActiveForTest; i++)
+                        await Task.Delay(10, timeout.Token);
+                    if (!window.RemoteActiveForTest)
+                        throw new Exception("Hidden Windows app could not re-enter mouse mode.");
+                    window.RestoreForTest();
+                    if (!window.Visible || window.IsDisposed)
+                        throw new Exception("The tray could not restore the GUI window.");
+                    window.Close();
+                    if (window.Visible || window.IsDisposed || closedEvents != 0 ||
+                        !window.ReceiverRunningForTest)
+                        throw new Exception("Closing restored GUI stopped its receiver.");
+                    await stream.ReadExactlyAsync(frameSize, timeout.Token);
+                    length = BinaryPrimitives.ReadInt32BigEndian(frameSize);
+                    if (length < 16 || length > WireProtocol.MaxFrameLength)
+                        throw new Exception("Second return-to-Mac frame size invalid.");
+                    payload = new byte[length];
+                    await stream.ReadExactlyAsync(payload, timeout.Token);
+                    returned = WireProtocol.Decrypt(
+                        payload, sessionKey, sequence: 1, fromMac: false
+                    );
+                    if (returned.Type != "leave" || window.RemoteActiveForTest)
+                        throw new Exception("Closing restored GUI did not free Mac input.");
+                }
 
                 await CheckLoopbackHandshake(secret, window.ListeningPortForTest);
                 if (!window.ReceiverRunningForTest)
@@ -82,7 +154,7 @@ internal static class Program
                 if (window.ReceiverRunningForTest || closedEvents != 1)
                     throw new Exception("Explicit Exit did not shut down the receiver.");
                 result = 0;
-                Console.WriteLine("PASS GUI X-to-tray, handshake, restore, explicit Exit");
+                Console.WriteLine("PASS GUI active-remote X returns Mac, receiver alive, restore, Exit");
             }
             catch (Exception error)
             {

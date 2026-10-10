@@ -20,6 +20,7 @@ internal sealed class ReceiverService : IAsyncDisposable
     private readonly InputInjector _injector = new(smoothMotion: true);
     private TcpListener? _listener;
     private TcpClient? _activeClient;
+    private SecureChannel? _activeChannel;
     private CancellationTokenSource? _cancel;
     private Task? _loop;
 
@@ -33,12 +34,44 @@ internal sealed class ReceiverService : IAsyncDisposable
     }
 
     public bool IsRunning => _listener is not null;
+    public bool IsRemotelyActive => _injector.IsRemotelyActive;
     public int ListeningPort =>
         (_listener?.LocalEndpoint as IPEndPoint)?.Port ?? 0;
 
     public void SetSmoothingEnabled(bool enabled) => _injector.SetSmoothingEnabled(enabled);
 
     public InputInjector.MotionGapStats TakeMotionGapStats() => _injector.TakeMotionGapStats();
+
+    /// <summary>
+    /// Called when the user closes the GUI while controlling Windows from
+    /// their Mac. Hiding the last Windows app window must never leave their
+    /// physical mouse trapped on Windows. Return Mac control but keep the
+    /// listener running, so moving to the edge can enter Windows again.
+    /// Do not rely on a Window Forms UI thread to keep the remote pointer
+    /// usable after the last visible form is hidden.
+    /// </summary>
+    public async Task ReturnCursorToMacAsync()
+    {
+        if (!_injector.IsRemotelyActive) return;
+        _injector.ReleaseAll();
+        var channel = Volatile.Read(ref _activeChannel);
+        if (channel is null) return;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await channel.SendAsync(
+                new MouseMessage { Type = "leave" }, timeout.Token
+            );
+        }
+        catch (Exception error) when (
+            error is IOException or OperationCanceledException or ObjectDisposedException
+        )
+        {
+            // The paired Mac also has a local emergency-return shortcut.
+            // Never block the Windows X button waiting for a broken socket.
+            System.Diagnostics.Debug.WriteLine($"CrossMouse return on hide: {error.Message}");
+        }
+    }
 
     public void Start()
     {
@@ -64,6 +97,7 @@ internal sealed class ReceiverService : IAsyncDisposable
         _loop = null;
         _cancel = null;
         cancel?.Cancel();
+        Volatile.Write(ref _activeChannel, null);
         _activeClient?.Dispose();
         listener.Stop();
         if (task is not null)
@@ -90,6 +124,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                     await using var channel = await SecureChannel.AcceptAsync(
                         client.GetStream(), _key, cancellationToken
                     );
+                    Volatile.Write(ref _activeChannel, channel);
                     StatusChanged?.Invoke(ReceiverState.Connected, "Mac 연결됨 · 입력 공유 준비됨");
                     using var sessionCancel =
                         CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -106,6 +141,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                     finally
                     {
                         sessionCancel.Cancel();
+                        Volatile.Write(ref _activeChannel, null);
                         try { await returnPoll; }
                         catch (OperationCanceledException) { }
                         catch (IOException) { }
@@ -126,6 +162,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                 }
                 finally
                 {
+                    Volatile.Write(ref _activeChannel, null);
                     _injector.ReleaseAll();
                     _activeClient = null;
                 }

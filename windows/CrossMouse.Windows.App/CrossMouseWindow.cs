@@ -37,6 +37,7 @@ internal sealed class CrossMouseWindow : Form
     // Tests inject a temporary key/ephemeral port instead of touching the
     // user's saved pairing key or an existing live TCP listener.
     internal bool ReceiverRunningForTest => _receiver?.IsRunning ?? false;
+    internal bool RemoteActiveForTest => _receiver?.IsRemotelyActive ?? false;
     internal int ListeningPortForTest => _receiver?.ListeningPort ?? 0;
     internal void RestoreForTest() => RestoreWindow();
     internal Task QuitForTestAsync() => QuitAsync();
@@ -320,14 +321,16 @@ internal sealed class CrossMouseWindow : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        // Every ordinary Close path, including taskbar/window chrome, must
-        // hide the window. The explicit Quit button/tray action is the only
-        // way to stop the input receiver during an ordinary desktop session.
+        // Hide every ordinary Close request without stopping the TCP listener.
+        // When closing from within a remote Mac-controlled session, release
+        // the remote cursor first so the physical mouse cannot get stuck.
         // Never block actual Windows shutdown or Task Manager termination.
         if (!_closing && e.CloseReason != CloseReason.WindowsShutDown &&
             e.CloseReason != CloseReason.TaskManagerClosing)
         {
             e.Cancel = true;
+            if (_receiver is not null)
+                _ = _receiver.ReturnCursorToMacAsync();
             Hide();
             _tray.Visible = true;
             return;
