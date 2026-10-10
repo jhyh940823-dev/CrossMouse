@@ -31,6 +31,15 @@ internal sealed class CrossMouseWindow : Form
     private readonly string _keyPath;
     private readonly byte[]? _pairingKey;
     private bool _closing;
+    private readonly bool _startInBackground;
+    private bool _backgroundStartPending;
+    private readonly LoginStartup _loginStartup;
+    private readonly CheckBox _loginCheck = new()
+    {
+        Text = "Windows 로그인 시 자동 실행", AutoSize = true
+    };
+    private readonly Label _loginStatus = NewLabel("", 9);
+    private bool _renderingLoginSetting;
 
     // Unlike ordinary Close(), only QuitAsync is allowed to destroy the main
     // form. Application.Run(form) would otherwise exit and kill the receiver.
@@ -42,13 +51,17 @@ internal sealed class CrossMouseWindow : Form
     internal void RestoreForTest() => RestoreWindow();
     internal Task QuitForTestAsync() => QuitAsync();
 
-    public CrossMouseWindow(byte[]? selfTestKey = null, int port = 49431)
+    public CrossMouseWindow(byte[]? selfTestKey = null, int port = 49431,
+        bool startInBackground = false, LoginStartup? loginStartup = null)
     {
+        _startInBackground = startInBackground;
+        _backgroundStartPending = startInBackground;
+        _loginStartup = loginStartup ?? new LoginStartup();
         string version = typeof(CrossMouseWindow).Assembly.GetName().Version?.ToString(3) ?? "unknown";
         Text = $"CrossMouse - Windows v{version}";
-        ClientSize = new Size(540, 435);
-        MinimumSize = new Size(510, 450);
-        MaximumSize = new Size(770, 600);
+        ClientSize = new Size(565, 520);
+        MinimumSize = new Size(550, 535);
+        MaximumSize = new Size(800, 680);
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 10F);
         StartPosition = FormStartPosition.CenterScreen;
@@ -110,6 +123,11 @@ internal sealed class CrossMouseWindow : Form
         _motionStats.MaximumSize = new Size(490, 0);
         _motionStats.AutoSize = true;
         _statsTimer.Tick += async (_, _) => await UpdateMouseStatsAsync();
+        _loginStatus.ForeColor = SystemColors.GrayText;
+        _loginStatus.MaximumSize = new Size(510, 0);
+        _loginStatus.AutoSize = true;
+        RenderLoginSetting();
+        _loginCheck.CheckedChanged += (_, _) => ChangeLoginSetting();
         _stop.Enabled = false;
         var copyKey = NewButton("페어링 키 복사");
         copyKey.Click += (_, _) => CopyPairingKey();
@@ -127,7 +145,7 @@ internal sealed class CrossMouseWindow : Form
         foreach (Control control in new Control[]
         {
             title, subtitle, address, _status, _detail, instruction,
-            _smoothing, _motionStats, buttons, privacy
+            _smoothing, _motionStats, _loginCheck, _loginStatus, buttons, privacy
         })
         {
             control.Margin = new Padding(0, 0, 0, 13);
@@ -153,11 +171,10 @@ internal sealed class CrossMouseWindow : Form
 
         // Keep one-click launch behavior. If the previous console receiver is
         // still running the UI shows a clear port-in-use error instead.
-        Shown += (_, _) =>
-        {
-            StartReceiver();
-            _statsTimer.Start();
-        };
+        // OnLoad also runs for the hidden login launch. Do not rely on Shown
+        // to start the listener, and do not briefly flash a foreground form.
+        Load += (_, _) => { StartReceiver(); _statsTimer.Start(); };
+        Activated += (_, _) => RenderLoginSetting();
         Resize += (_, _) =>
         {
             if (WindowState == FormWindowState.Minimized) Hide();
@@ -170,6 +187,66 @@ internal sealed class CrossMouseWindow : Form
             _tray.Dispose();
             trayMenu.Dispose();
         };
+    }
+
+    protected override void SetVisibleCore(bool value)
+    {
+        if (_backgroundStartPending && value)
+        {
+            _backgroundStartPending = false;
+            // Creating the handle invokes OnLoad without displaying a window.
+            // The Forms message loop and tray remain alive; manual re-open is
+            // permitted on every subsequent visibility request.
+            if (!IsHandleCreated) CreateHandle();
+            base.SetVisibleCore(false);
+            return;
+        }
+        base.SetVisibleCore(value);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (_startInBackground)
+        {
+            // Handle creation does not guarantee Load if visibility is false.
+            // Schedule this on the running UI message loop. Start is idempotent.
+            BeginInvoke(new Action(() =>
+            {
+                if (_closing || IsDisposed) return;
+                StartReceiver();
+                _statsTimer.Start();
+            }));
+        }
+    }
+
+    private void RenderLoginSetting(string? error = null)
+    {
+        if (_renderingLoginSetting) return;
+        _renderingLoginSetting = true;
+        try
+        {
+            string exe = Environment.ProcessPath ?? "";
+            _loginCheck.Checked = _loginStartup.IsEnabledFor(exe);
+            _loginStatus.Text = error ?? (_loginCheck.Checked
+                ? "등록됨 · 로그인 후 트레이로 시작합니다. 현재 EXE를 이동·삭제하지 마세요."
+                : _loginStartup.RegisteredCommand is not null
+                    ? "다른 경로의 CrossMouse가 등록돼 있습니다. 체크하면 현재 EXE로 변경합니다."
+                    : "꺼짐 · 체크하면 현재 사용자 계정의 시작 항목에 등록합니다.");
+        }
+        catch (Exception problem) { _loginStatus.Text = "자동 실행 상태 확인 실패: " + problem.Message; }
+        finally { _renderingLoginSetting = false; }
+    }
+
+    private void ChangeLoginSetting()
+    {
+        if (_renderingLoginSetting) return;
+        try
+        {
+            _loginStartup.SetEnabled(_loginCheck.Checked, Environment.ProcessPath ?? "");
+            RenderLoginSetting();
+        }
+        catch (Exception error) { RenderLoginSetting("자동 실행 설정 실패: " + error.Message); }
     }
 
     private static Button NewButton(string title) => new()
@@ -313,6 +390,8 @@ internal sealed class CrossMouseWindow : Form
         WindowState = FormWindowState.Normal;
         Activate();
     }
+
+    internal void ShowControls() => RestoreWindow();
 
     private async Task QuitAsync()
     {

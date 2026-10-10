@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>CrossMouse</AssemblyName>
-    <Version>0.3.5</Version>
+    <Version>0.3.6</Version>
   </PropertyGroup>
   <ItemGroup>
     <!-- Reuse the exact protocol and Win32 input code from the tested CLI

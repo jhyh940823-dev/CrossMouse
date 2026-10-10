@@ -97,16 +97,28 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var autoInputSwitch = UserDefaults.standard.bool(forKey: "CrossMouse.autoInputSwitch")
     private var monitorStatus = "DDC 입력 전환은 확인 후에만 활성화할 수 있습니다."
     private var autoEnteredFromPhilips = false
+    private var launchedInBackground = false
 
     init(options: Options) {
         self.options = options
         super.init()
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        launchedInBackground = MacLoginItem.isBackgroundLaunch(
+            arguments: CommandLine.arguments,
+            event: NSAppleEventManager.shared().currentAppleEvent
+        )
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         setupMenu()
         setupWindow()
+        launchedInBackground = launchedInBackground || MacLoginItem.isBackgroundLaunch(
+            arguments: CommandLine.arguments,
+            event: NSAppleEventManager.shared().currentAppleEvent
+        )
         refreshDisplay()
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -189,7 +201,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         network.start()
         installEventTap()
         updateMenu()
-        controlWindow.show()
+        refreshLoginItemStatus()
+        if !launchedInBackground { controlWindow.show() }
         let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tickHotCorner() }
         }
@@ -217,6 +230,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        refreshLoginItemStatus()
         controlWindow.show()
         return true
     }
@@ -234,6 +248,38 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         controlWindow.onHDMITest = { [weak self] in self?.testMonitorInput(.hdmi) }
         controlWindow.onDVITest = { [weak self] in self?.testMonitorInput(.dvi) }
         controlWindow.onAutoSwitch = { [weak self] enabled in self?.setAutoInputSwitch(enabled) }
+        controlWindow.onLoginItem = { [weak self] enabled in self?.setLoginItem(enabled) }
+        controlWindow.onLoginSettings = { MacLoginItem.openSettings() }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if controlWindow != nil { refreshLoginItemStatus() }
+    }
+
+    private func refreshLoginItemStatus(error: String? = nil) {
+        let status = MacLoginItem.status
+        let message: String
+        if let error { message = "자동 실행 설정 실패: " + error }
+        else {
+            switch status {
+            case .enabled: message = "등록됨 · 로그인 후 창 없이 연결합니다. 앱 위치를 옮기지 마세요."
+            case .requiresApproval: message = "승인 필요 · macOS 로그인 항목 설정에서 허용해 주세요."
+            case .notRegistered: message = "꺼짐 · 체크하면 이 Mac 계정의 로그인 항목에 등록합니다."
+            case .notFound: message = "앱을 고정된 위치에서 실행한 뒤 다시 등록해 주세요."
+            @unknown default: message = "시스템 로그인 항목 설정에서 상태를 확인해 주세요."
+            }
+        }
+        controlWindow.renderLoginItem(
+            enabled: status == .enabled, awaitingApproval: status == .requiresApproval,
+            message: message
+        )
+    }
+
+    private func setLoginItem(_ enabled: Bool) {
+        do {
+            try MacLoginItem.setEnabled(enabled)
+            refreshLoginItemStatus()
+        } catch { refreshLoginItemStatus(error: error.localizedDescription) }
     }
 
     private func setupMenu() {
@@ -288,6 +334,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showWindowAction() {
+        refreshLoginItemStatus()
         controlWindow.show()
     }
 
@@ -732,6 +779,11 @@ private let crossMouseEventCallback: CGEventTapCallBack = { _, type, event, user
 }
 
 do {
+    if CommandLine.arguments.contains("--startup-self-test") {
+        let passed = MacLoginItem.selfTest()
+        print(passed ? "PASS Mac login launch classification (no registration changes)" : "FAIL Mac startup classification")
+        exit(passed ? 0 : 1)
+    }
     let options = try Options.parse()
     let delegate = CrossMouseApp(options: options)
     let application = NSApplication.shared

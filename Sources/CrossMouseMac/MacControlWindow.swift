@@ -11,6 +11,8 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     var onHDMITest: (() -> Void)?
     var onDVITest: (() -> Void)?
     var onAutoSwitch: ((Bool) -> Void)?
+    var onLoginItem: ((Bool) -> Void)?
+    var onLoginSettings: (() -> Void)?
 
     private let macButton = NSButton(radioButtonWithTitle: "Mac 듀얼 모니터 (DVI)", target: nil, action: nil)
     private let windowsButton = NSButton(radioButtonWithTitle: "Windows 사용 (HDMI)", target: nil, action: nil)
@@ -27,16 +29,21 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         target: nil, action: nil
     )
     private let monitorStatusLabel = NSTextField(labelWithString: "")
+    private let loginCheck = NSButton(
+        checkboxWithTitle: "Mac 로그인 시 자동 실행", target: nil, action: nil
+    )
+    private let loginSettingsButton = NSButton(title: "로그인 항목 설정", target: nil, action: nil)
+    private let loginStatusLabel = NSTextField(labelWithString: "")
 
     init() {
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 565, height: 465),
+            contentRect: CGRect(x: 0, y: 0, width: 565, height: 540),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "CrossMouse"
-        window.minSize = NSSize(width: 550, height: 455)
+        window.title = "CrossMouse v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")
+        window.minSize = NSSize(width: 550, height: 525)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         placeOnSamsung()
@@ -89,6 +96,16 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         monitorStatusLabel.textColor = .secondaryLabelColor
         monitorStatusLabel.maximumNumberOfLines = 0
         monitorStatusLabel.lineBreakMode = .byWordWrapping
+        loginCheck.target = self
+        loginCheck.action = #selector(toggleLoginItem)
+        loginCheck.font = .systemFont(ofSize: 12)
+        loginSettingsButton.target = self
+        loginSettingsButton.action = #selector(openLoginSettings)
+        loginSettingsButton.bezelStyle = .rounded
+        loginStatusLabel.font = .systemFont(ofSize: 12)
+        loginStatusLabel.textColor = .secondaryLabelColor
+        loginStatusLabel.maximumNumberOfLines = 0
+        loginStatusLabel.lineBreakMode = .byWordWrapping
 
         let modeRow = NSStackView(views: [macButton, windowsButton])
         modeRow.orientation = .horizontal
@@ -99,6 +116,9 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         let ddcRow = NSStackView(views: [ddcTestButton, ddcReturnButton])
         ddcRow.orientation = .horizontal
         ddcRow.spacing = 12
+        let loginRow = NSStackView(views: [loginCheck, loginSettingsButton])
+        loginRow.orientation = .horizontal
+        loginRow.spacing = 15
 
         noteLabel.stringValue = "X 버튼은 창만 숨깁니다. 앱은 상단 ⇆ 메뉴에서 다시 열 수 있고, '앱 종료'로 완전히 끕니다."
         noteLabel.font = .systemFont(ofSize: 12)
@@ -108,7 +128,8 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         let stack = NSStackView(views: [
             title, subtitle, statusLabel, section, modeRow,
             modeDescription, diagnosticsLabel, ddcRow,
-            autoSwitchCheck, monitorStatusLabel, actionRow, noteLabel
+            autoSwitchCheck, monitorStatusLabel, loginRow, loginStatusLabel,
+            actionRow, noteLabel
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -122,6 +143,12 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -18)
         ])
+    }
+
+    func renderLoginItem(enabled: Bool, awaitingApproval: Bool, message: String) {
+        loginCheck.allowsMixedState = awaitingApproval
+        loginCheck.state = awaitingApproval ? .mixed : (enabled ? .on : .off)
+        loginStatusLabel.stringValue = message
     }
 
     func render(connected: Bool, connecting: Bool, windowsMode: Bool,
@@ -193,4 +220,6 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     @objc private func toggleAutoSwitch() {
         onAutoSwitch?(autoSwitchCheck.state == .on)
     }
+    @objc private func toggleLoginItem() { onLoginItem?(loginCheck.state != .off) }
+    @objc private func openLoginSettings() { onLoginSettings?() }
 }

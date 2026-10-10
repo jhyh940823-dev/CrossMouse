@@ -30,13 +30,24 @@ internal static class Program
             }
         }
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--startup-self-test"))
+            return StartupRegression.Run();
         if (args.Contains("--receiver-ui-independence-test"))
             return RemoteInputRegression.Run(clickCaption: false);
         if (args.Contains("--remote-caption-test"))
             return RemoteInputRegression.Run(clickCaption: true);
         if (args.Contains("--gui-self-test"))
             return GuiLifetimeSelfTest();
-        Application.Run(new CrossMouseWindow());
+        bool background = args.Contains("--background");
+        using var instance = new SingleInstance();
+        if (!instance.IsOwner)
+        {
+            if (!background) instance.NotifyExisting();
+            return 0;
+        }
+        using var window = new CrossMouseWindow(startInBackground: background);
+        instance.Listen(window);
+        Application.Run(window);
         return 0;
     }
 
@@ -271,7 +282,7 @@ internal static class Program
         if (server.IsRunning) throw new Exception("Receiver did not stop.");
     }
 
-    private static async Task CheckLoopbackHandshake(byte[] secret, int port)
+    internal static async Task CheckLoopbackHandshake(byte[] secret, int port)
     {
         using var client = new TcpClient();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
