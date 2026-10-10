@@ -27,7 +27,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc local signature: no developer account, team profile or credentials.
-codesign --force --sign - "$APP"
+# Default to an ad-hoc signature (suitable for CI). Local developers can use
+# their own persistent Apple Development certificate so Accessibility approval
+# survives rebuilding. Never check a signing identity or private key into git.
+SIGN_IDENTITY="${CROSSMOUSE_CODESIGN_IDENTITY:--}"
+codesign --force --sign "$SIGN_IDENTITY" "$APP"
 echo "Built: $APP"
 echo "Configure ~/.config/crossmouse/{key,host}, then open $APP"

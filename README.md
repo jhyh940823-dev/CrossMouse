@@ -71,6 +71,8 @@ macOS 15 이상에서는 **로컬 네트워크** 접근도 허용해야 합니�
 
 **앱을 새로 빌드한 직후 권한이 풀린 경우:** 이 로컬 앱은 개발용 ad-hoc 서명으로 빌드되며 바이너리 갱신 시 macOS가 다시 손쉬운 사용 권한 승인을 요구할 수 있습니다. 메뉴의 `Input capture unavailable: Accessibility not granted` 또는 `Input Monitoring not granted`를 보면 **시스템 설정 → 개인정보 보호 및 보안 → 기기 제어 및 데이터 접근**(macOS 버전에 따라 손쉬운 사용/입력 모니터링)에서 CrossMouseMac의 권한을 다시 확인하고, 메뉴의 **Retry input capture**를 선택하세요. 단순히 `Connected to Windows`인 것만으로 마우스 입력 감지가 동작한다는 뜻은 아닙니다.
 
+Mac에 개인용 Apple Development 코드 서명 인증서가 이미 설치돼 있다면 `CROSSMOUSE_CODESIGN_IDENTITY=<인증서 SHA-1> ./scripts/build-mac-app.sh`로 로컬 빌드에만 지속적인 인증서 서명을 사용할 수 있습니다. 이 경우 재빌드마다 다른 ad-hoc 식별자가 생성되는 문제를 피할 수 있습니다. 인증서/서명키를 저장소에 넣거나 공유하지 마세요. 기존에 ad-hoc 서명으로 부여한 손쉬운 사용 권한은 서명 방식을 바꾼 뒤 새로 승인해야 할 수 있습니다.
+
 CrossMouse 메뉴의 **Input capture installed**와 **Entered Windows (attempt N)** 항목으로 입력 감지와 화면 경계 인식을 각각 확인할 수 있습니다. 진단에는 키 입력 내용이 저장되지 않습니다.
 
 터미널에서 직접 실행할 수도 있습니다:
