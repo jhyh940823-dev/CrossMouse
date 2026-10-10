@@ -40,7 +40,7 @@ final class WireProtocolTests: XCTestCase {
             secret: secret, clientNonce: clientNonce, serverNonce: serverNonce
         )
         let frame = try CrossMouseWire.frame(
-            CrossMouseMessage(type: "key", code: 55, down: true),
+            CrossMouseMessage(type: "key", down: true, code: 55),
             sessionKey: key, sequence: 5, direction: .macToWindows
         )
         XCTAssertThrowsError(
