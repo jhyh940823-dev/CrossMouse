@@ -57,6 +57,7 @@ internal static class ServiceBoundaryRegression
         var clicked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var typed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int clickCount = 0, textChanges = 0;
         var thread = new Thread(() =>
         {
             try
@@ -66,8 +67,12 @@ internal static class ServiceBoundaryRegression
                     Location = new Point(100, 100), ClientSize = new Size(420, 200), TopMost = true };
                 var text = new TextBox { Location = new Point(30, 30), Width = 300 };
                 var button = new Button { Text = "Test input", Location = new Point(30, 85), Size = new Size(160, 45) };
-                text.TextChanged += (_, _) => { if (text.Text.Equals("a", StringComparison.OrdinalIgnoreCase)) typed.TrySetResult(); };
-                button.Click += (_, _) => clicked.TrySetResult();
+                text.TextChanged += (_, _) =>
+                {
+                    Interlocked.Increment(ref textChanges);
+                    if (text.Text.Equals("a", StringComparison.OrdinalIgnoreCase)) typed.TrySetResult();
+                };
+                button.Click += (_, _) => { Interlocked.Increment(ref clickCount); clicked.TrySetResult(); };
                 window.Controls.Add(text); window.Controls.Add(button);
                 window.Shown += (_, _) => shown.TrySetResult(new(window,
                     text.PointToScreen(new Point(40, 12)), button.PointToScreen(new Point(60, 20))));
@@ -85,23 +90,41 @@ internal static class ServiceBoundaryRegression
             Require(SwitchDesktop(desktop), "Could not activate the isolated test desktop.");
             await Task.Delay(350, token);
             transfer = Guid.NewGuid().ToString();
-            await peer.SendAsync(new MouseMessage { Type = "prepare", TransferId = transfer }, token);
-            var prepared = await peer.ReadAsync(token);
-            Require(prepared.Type == "prepared", $"Preparation failed on alternate input desktop: {prepared.Type}/{prepared.Reason}");
-            await peer.SendAsync(new MouseMessage { Type = "enter", TransferId = transfer, CenterCursor = true }, token);
-            var entered = await peer.ReadAsync(token);
-            Require(entered.Type == "entered" && entered.PointerVisible == true && entered.TransferId == transfer,
-                $"Service could not acquire the isolated input desktop: {entered.Type}/{entered.Reason}");
+            await Acquire(peer, transfer, token);
             await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
             pong = await peer.ReadAsync(token);
             Require(pong.InputDesktop == name, "Service still reported a stale Default desktop.");
             await MoveClick(peer, transfer, target.Text, token);
-            await peer.SendAsync(new MouseMessage { Type = "key", TransferId = transfer, Code = 0, Down = true }, token);
-            await peer.SendAsync(new MouseMessage { Type = "key", TransferId = transfer, Code = 0, Down = false }, token);
+            await TypeA(peer, transfer, token);
             await typed.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
             await MoveClick(peer, transfer, target.Button, token);
             await clicked.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
             Console.WriteLine("PASS authenticated pointer, click, and key input on a different interactive desktop");
+            await peer.SendAsync(new MouseMessage { Type = "leave", TransferId = transfer }, token);
+            transfer = null;
+
+            // A real elevation dialog opens while an owner already exists.
+            // Prove the same owner follows the input desktop, not merely that
+            // a new owner can be created after switching is already complete.
+            Require(SwitchDesktop(original), "Could not restore before active-transition check.");
+            await Task.Delay(150, token);
+            transfer = Guid.NewGuid().ToString();
+            await Acquire(peer, transfer, token);
+            int clicksBefore = Volatile.Read(ref clickCount), textBefore = Volatile.Read(ref textChanges);
+            Require(SwitchDesktop(desktop), "Could not switch while service input is active.");
+            await Task.Delay(150, token);
+            await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
+            pong = await peer.ReadAsync(token);
+            Require(pong.Type == "pong" && pong.InputDesktop == name,
+                $"Active owner did not follow the new input desktop: {pong.Type}/{pong.Reason}");
+            await MoveClick(peer, transfer, target.Text, token);
+            await TypeA(peer, transfer, token);
+            await MoveClick(peer, transfer, target.Button, token);
+            using var transition = CancellationTokenSource.CreateLinkedTokenSource(token);
+            transition.CancelAfter(TimeSpan.FromSeconds(3));
+            while (Volatile.Read(ref clickCount) <= clicksBefore || Volatile.Read(ref textChanges) <= textBefore)
+                await Task.Delay(20, transition.Token);
+            Console.WriteLine("PASS existing authenticated owner preserves click/key control across an input-desktop change");
             await peer.SendAsync(new MouseMessage { Type = "leave", TransferId = transfer }, token);
             transfer = null;
         }
@@ -122,6 +145,21 @@ internal static class ServiceBoundaryRegression
         pong = await peer.ReadAsync(token);
         Require(pong.Type == "pong" && pong.InputDesktop != name, "Service did not follow restoration to the original desktop.");
         Console.WriteLine("PASS original desktop restored; same authenticated service connection stays alive");
+    }
+    private static async Task Acquire(RemoteInputRegression.Peer peer, string transfer, CancellationToken token)
+    {
+        await peer.SendAsync(new MouseMessage { Type = "prepare", TransferId = transfer }, token);
+        var prepared = await peer.ReadAsync(token);
+        Require(prepared.Type == "prepared", $"Preparation failed on input desktop: {prepared.Type}/{prepared.Reason}");
+        await peer.SendAsync(new MouseMessage { Type = "enter", TransferId = transfer, CenterCursor = true }, token);
+        var entered = await peer.ReadAsync(token);
+        Require(entered.Type == "entered" && entered.PointerVisible == true && entered.TransferId == transfer,
+            $"Service could not acquire input desktop: {entered.Type}/{entered.Reason}");
+    }
+    private static async Task TypeA(RemoteInputRegression.Peer peer, string id, CancellationToken token)
+    {
+        await peer.SendAsync(new MouseMessage { Type = "key", TransferId = id, Code = 0, Down = true }, token);
+        await peer.SendAsync(new MouseMessage { Type = "key", TransferId = id, Code = 0, Down = false }, token);
     }
     private static async Task MoveClick(RemoteInputRegression.Peer peer, string id, Point target, CancellationToken token)
     {
