@@ -32,5 +32,7 @@ try {
     if (Get-Process -Id $state.AgentPid -ErrorAction SilentlyContinue) { throw 'Owned SYSTEM input agent survived service stop.' }
     Write-Host 'PASS graceful service stop and bounded agent lifetime'
 } finally {
+    $probe = Join-Path $env:ProgramData 'CrossMouse\desktop-permissions.json'
+    if (Test-Path $probe) { Get-Content $probe -Raw | Write-Host }
     & (Join-Path $PSScriptRoot 'Install-Windows.ps1') -UninstallService
 }

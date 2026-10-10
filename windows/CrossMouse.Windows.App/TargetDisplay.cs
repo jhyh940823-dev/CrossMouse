@@ -22,10 +22,8 @@ internal sealed record TargetDisplay(nint Handle, Native.DesktopRectangle Bounds
 
     internal static TargetDisplay Resolve()
     {
-        // Display enumeration/geometry belongs to the same input desktop as
-        // cursor injection. Session-zero/default desktop metrics are not a
-        // valid source when the physical console is on Winlogon/another desktop.
         using var desktop = InputDesktopAccess.Enter();
+        DesktopPermissionProbe.Observe();
         var found = new List<TargetDisplay>();
         MonitorEnum callback = (handle, _, _, _) =>
         {
