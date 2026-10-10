@@ -22,6 +22,7 @@ internal sealed class InputInjector
     private bool _remoteActive;
     private bool _leftReturnPending;
     private string? _inputFailure;
+    private string? _inputDesktop;
     public string? InputFailure { get { lock (_sync) return _inputFailure; } }
     private Native.DesktopRectangle? _targetDisplay;
     public bool IsActiveForPresentation => Volatile.Read(ref _remoteActive);
@@ -82,6 +83,7 @@ internal sealed class InputInjector
     {
         lock (_sync)
         {
+            if (_remoteActive && !RefreshInputDesktop()) return;
             if (!_remoteActive || !_smoothMotion || !_motion.HasPending) return;
             var step = _motion.StepAt(Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency);
             MoveCore(step.Dx, step.Dy);
@@ -95,6 +97,7 @@ internal sealed class InputInjector
             if (message.Type == "enter")
             {
                 _inputFailure = null;
+                _inputDesktop = InputDesktopAccess.CurrentName();
                 ReleaseAllCore();
                 _motion.Reset();
                 _leftReturnPending = false;
@@ -124,6 +127,7 @@ internal sealed class InputInjector
                 return;
             }
             if (!_remoteActive) return;
+            if (!RefreshInputDesktop()) return;
 
             switch (message.Type)
             {
@@ -214,6 +218,22 @@ internal sealed class InputInjector
         _lastMovementTimestamp = now;
     }
 
+    private bool RefreshInputDesktop()
+    {
+        string? desktop = InputDesktopAccess.CurrentName();
+        if (desktop is null) { _inputFailure = "input-desktop-unavailable"; return false; }
+        if (_inputDesktop == desktop) return true;
+        // A UAC/lock transition is a boundary, not a cursor move. Do not replay
+        // buffered movement or held state into the new screen. Authorized new
+        // input can continue on the same focus lease without changing video.
+        ReleaseAllCore();
+        _motion.Reset();
+        _leftReturnPending = false;
+        _inputDesktop = desktop;
+        _inputFailure = null;
+        return true;
+    }
+
     private void FlushMovementCore()
     {
         if (!_smoothMotion || !_motion.HasPending) return;
@@ -248,6 +268,8 @@ internal sealed class InputInjector
 
 internal static class Native
 {
+    [ThreadStatic] private static string? _lastInputError;
+    internal static string LastInputError => _lastInputError ?? "unspecified";
     [StructLayout(LayoutKind.Sequential)]
     internal struct Point { public int X; public int Y; }
 
@@ -304,12 +326,12 @@ internal static class Native
     internal static bool GetCursorPos(out Point point)
     {
         try { using var access = InputDesktopAccess.Enter(); return GetCursorPosRaw(out point); }
-        catch (System.ComponentModel.Win32Exception) { point = default; return false; }
+        catch (System.ComponentModel.Win32Exception error) { _lastInputError = error.Message + ":" + error.NativeErrorCode; point = default; return false; }
     }
     internal static bool SetCursorPos(int x, int y)
     {
         try { using var access = InputDesktopAccess.Enter(); return SetCursorPosRaw(x, y); }
-        catch (System.ComponentModel.Win32Exception) { return false; }
+        catch (System.ComponentModel.Win32Exception error) { _lastInputError = error.Message + ":" + error.NativeErrorCode; return false; }
     }
 
     [DllImport("user32.dll")]
@@ -318,10 +340,11 @@ internal static class Native
     [DllImport("user32.dll")]
     internal static extern bool SetProcessDPIAware();
 
-    internal static DesktopRectangle Desktop() => new(
-        GetSystemMetrics(76), GetSystemMetrics(77),
-        GetSystemMetrics(78), GetSystemMetrics(79)
-    );
+    internal static DesktopRectangle Desktop()
+    {
+        using var access = InputDesktopAccess.Enter();
+        return new(GetSystemMetrics(76), GetSystemMetrics(77), GetSystemMetrics(78), GetSystemMetrics(79));
+    }
 
     /// <summary>
     /// Send an actual absolute mouse-move event on entry. SetCursorPos only
@@ -330,8 +353,10 @@ internal static class Native
     /// </summary>
     internal static bool WakePointerAt(int x, int y)
     {
-        var desktop = Desktop();
-        if (desktop.Width <= 0 || desktop.Height <= 0) return false;
+        DesktopRectangle desktop;
+        try { desktop = Desktop(); }
+        catch (System.ComponentModel.Win32Exception error) { _lastInputError = error.Message + ":" + error.NativeErrorCode; return false; }
+        if (desktop.Width <= 0 || desktop.Height <= 0) { _lastInputError = "empty-input-desktop-geometry"; return false; }
         static int Normalize(int value, int origin, int size) =>
             (int)Math.Clamp(((2L * (value - origin) + 1) * 65536) / (2L * size), 0, 65535);
         var input = new Input
@@ -408,8 +433,10 @@ internal static class Native
         try
         {
             using var access = InputDesktopAccess.Enter();
-            return SendInput(1, [input], Marshal.SizeOf<Input>()) == 1;
+            bool accepted = SendInput(1, [input], Marshal.SizeOf<Input>()) == 1;
+            _lastInputError = accepted ? null : "SendInput:" + Marshal.GetLastWin32Error();
+            return accepted;
         }
-        catch (System.ComponentModel.Win32Exception) { return false; }
+        catch (System.ComponentModel.Win32Exception error) { _lastInputError = error.Message + ":" + error.NativeErrorCode; return false; }
     }
 }

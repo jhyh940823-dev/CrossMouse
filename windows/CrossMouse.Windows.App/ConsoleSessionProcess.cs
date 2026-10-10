@@ -12,6 +12,7 @@ internal sealed class ConsoleSessionProcess : IDisposable
     internal uint SessionId { get; }
     internal static uint ActiveSession => WTSGetActiveConsoleSessionId();
     internal bool HasExited => WaitForSingleObject(_process, 0) != 0x102;
+    internal uint ExitCode => GetExitCodeProcess(_process, out uint code) ? code : uint.MaxValue;
     private ConsoleSessionProcess(nint process, nint job, uint session)
     { _process = process; _job = job; SessionId = session; }
 
@@ -87,6 +88,7 @@ internal sealed class ConsoleSessionProcess : IDisposable
     [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
     [DllImport("kernel32.dll")] private static extern nint GetCurrentProcess();
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(nint handle);
+    [DllImport("kernel32.dll")] private static extern bool GetExitCodeProcess(nint process, out uint code);
     [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(nint handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(nint process, uint exitCode);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(nint thread);

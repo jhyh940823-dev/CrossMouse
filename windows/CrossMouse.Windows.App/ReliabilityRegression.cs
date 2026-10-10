@@ -116,9 +116,17 @@ internal static class ReliabilityRegression
         Require(raster.VisiblePixels >= 5, $"{name}: no visible pixels");
         Require(raster.HotX >= 0 && raster.HotX < raster.Width && raster.HotY >= 0 && raster.HotY < raster.Height,
             $"{name}: invalid hotspot");
+        int darkInk = 0, lightInk = 0;
         for (int i = 0; i < raster.Pixels.Length; i += 4)
+        {
             Require(raster.Pixels[i] <= raster.Pixels[i + 3] && raster.Pixels[i + 1] <= raster.Pixels[i + 3] &&
                 raster.Pixels[i + 2] <= raster.Pixels[i + 3], $"{name}: invalid premultiplied alpha");
+            int brightness = (raster.Pixels[i] + raster.Pixels[i + 1] + raster.Pixels[i + 2]) / 3;
+            int alpha = raster.Pixels[i + 3];
+            if (alpha - brightness >= 80) darkInk++;
+            if (brightness >= 80) lightInk++;
+        }
+        Require(darkInk >= 5 && lightInk >= 5, $"{name}: cursor is not readable on both light and dark content ({darkInk}/{lightInk}).");
     }
     private static void Save(CursorRaster raster, string path, Color background)
     {

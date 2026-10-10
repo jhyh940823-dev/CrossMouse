@@ -27,9 +27,10 @@ internal sealed class MotionSmoother
         if ((dx == 0 && dy == 0) || !double.IsFinite(nowMilliseconds)) return;
         double now = Math.Max(_lastRender, nowMilliseconds);
         double source = sourceMicroseconds is >= 0 ? sourceMicroseconds.Value / 1000.0 : now;
+        bool wasIdle = !HasPending;
         _targetX = _emittedX + Math.Clamp(_targetX - _emittedX + dx, -32768, 32768);
         _targetY = _emittedY + Math.Clamp(_targetY - _emittedY + dy, -32768, 32768);
-        if (_sourceBase is null || source < _lastSource || source - _lastSource > 250 || now - _lastArrival > 250)
+        if (wasIdle || _sourceBase is null || source < _lastSource || source - _lastSource > 250 || now - _lastArrival > 250)
         {
             _sourceBase = source; _localBase = now + 16;
             _samples.Clear(); _samples.Add(new(now, _emittedX, _emittedY));
