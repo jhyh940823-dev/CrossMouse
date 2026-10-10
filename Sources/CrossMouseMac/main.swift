@@ -806,7 +806,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             .otherMouseDown, .otherMouseUp, .scrollWheel,
             .keyDown, .keyUp, .flagsChanged
         ]
-        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
+        let mask = types.reduce(DisplayReturnEvent.eventMask) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap,
             options: .defaultTap, eventsOfInterest: mask,
@@ -856,20 +856,23 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        if type == .keyDown || type == .keyUp {
-            let modifiers: CGEventFlags = [.maskControl, .maskAlternate, .maskShift, .maskCommand]
-            let decision = displayReturnShortcut.handle(
-                keyCode: keyCode, down: type == .keyDown,
-                isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
-                hasModifiers: !event.flags.intersection(modifiers).isEmpty,
+        if let shortcutEvent = DisplayReturnEvent(type: type, event: event) {
+            let decision = shortcutEvent.apply(
+                to: &displayReturnShortcut,
                 enabled: verifiedDVI && (windowsReady || automaticHandoff.inProgress || requestedMacDisplay)
             )
             switch decision {
-            case .requestDVI: requestMacDisplay(); return nil
+            case .requestDVI:
+                traceTransfer("DVI-key-\(shortcutEvent.source.rawValue)", id: automaticHandoff.id)
+                requestMacDisplay()
+                return nil
             case .consume: return nil
             case .pass: break
             }
         }
+        // Adding systemDefined to the event mask must not swallow volume,
+        // brightness, eject, or a play key that was not captured for DVI.
+        if type == DisplayReturnEvent.systemDefinedType { return Unmanaged.passUnretained(event) }
         let shortcutFlags: CGEventFlags = [.maskControl, .maskAlternate, .maskShift]
         if type == .keyDown && event.flags.intersection(shortcutFlags) == shortcutFlags {
             if keyCode == 53 { // Ctrl+Option+Shift+Escape: emergency local return.
