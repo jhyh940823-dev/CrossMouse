@@ -174,13 +174,13 @@ internal sealed class SecureChannel : IAsyncDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(5));
         byte[] hello = new byte[WireProtocol.HelloLength];
-        await stream.ReadExactlyAsync(hello, timeout.Token);
+        await stream.ReadExactlyAsync(hello, timeout.Token).ConfigureAwait(false);
         if (!WireProtocol.VerifyClientHello(hello, secret, out var clientNonce))
             throw new CryptographicException("Client authentication failed.");
 
         byte[] serverNonce = RandomNumberGenerator.GetBytes(16);
         byte[] response = WireProtocol.ServerHello(secret, clientNonce, serverNonce);
-        await stream.WriteAsync(response, timeout.Token);
+        await stream.WriteAsync(response, timeout.Token).ConfigureAwait(false);
         byte[] sessionKey = WireProtocol.SessionKey(secret, clientNonce, serverNonce);
         return new SecureChannel(stream, sessionKey);
     }
@@ -188,24 +188,24 @@ internal sealed class SecureChannel : IAsyncDisposable
     public async Task<MouseMessage> ReadAsync(CancellationToken cancellationToken)
     {
         byte[] header = new byte[4];
-        await _stream.ReadExactlyAsync(header, cancellationToken);
+        await _stream.ReadExactlyAsync(header, cancellationToken).ConfigureAwait(false);
         int length = BinaryPrimitives.ReadInt32BigEndian(header);
         if (length < 16 || length > WireProtocol.MaxFrameLength)
             throw new InvalidDataException("Rejected oversized/invalid encrypted packet.");
         byte[] payload = new byte[length];
-        await _stream.ReadExactlyAsync(payload, cancellationToken);
+        await _stream.ReadExactlyAsync(payload, cancellationToken).ConfigureAwait(false);
         return WireProtocol.Decrypt(payload, _sessionKey, _receiveSequence++, fromMac: true);
     }
 
     public async Task SendAsync(MouseMessage message, CancellationToken cancellationToken)
     {
-        await _writer.WaitAsync(cancellationToken);
+        await _writer.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             byte[] frame = WireProtocol.Encrypt(
                 message, _sessionKey, _sendSequence++, fromMac: false
             );
-            await _stream.WriteAsync(frame, cancellationToken);
+            await _stream.WriteAsync(frame, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

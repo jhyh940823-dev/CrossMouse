@@ -64,10 +64,10 @@ internal static class Program
                 if (!window.ReceiverRunningForTest || window.ListeningPortForTest == 0)
                     throw new Exception("GUI failed to start receiver.");
 
-                // Simulate a REAL Mac actively controlling the Windows cursor
-                // and clicking X on the GUI from that remote session. Earlier
-                // CI only checked X while no remote mouse was present, which
-                // missed the user's cursor-trap failure.
+                // Test authenticated remote state plus direct Form.Close().
+                // This is NOT a native titlebar click. The separate
+                // --remote-caption-test sends encrypted button-down/up and
+                // verifies that WM_NCLBUTTONDOWN/HTCLOSE was really observed.
                 using (var client = new TcpClient())
                 using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
                 {

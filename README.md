@@ -1,5 +1,27 @@
 # CrossMouse
 
+## Windows v0.3.5 — 원격 제목 표시줄 클릭과 입력 수신 스레드 분리
+
+사용자가 확인한 차이는 **PC에 동글 직접 연결 → X 정상, Mac에서 공유한 입력 → X 클릭 후 공유 중단**입니다. v0.3.4를 바꾸기 전에 새 회귀 검사를 추가해 Windows CI에서 두 실패를 확인했습니다.
+
+- UI 메시지 처리를 1.5초 보류하면 같은 프로세스의 암호화 `ping/pong`도 멈췄습니다.
+- `Form.Close()`를 직접 호출하는 대신 실제 암호화 `move` / `button down` / `button up`을 수신기에 보내 Windows의 기본 X 버튼을 눌렀습니다. `WM_NCLBUTTONDOWN/HTCLOSE`가 관찰됐지만 `leave` 응답이 제한 시간 안에 오지 않았습니다.
+
+재현용 커밋: `f66000f` (기존 v0.3.4 동작은 그대로 두고 테스트만 추가). Windows CI 실행: `38046424801`. 이 실패 실행은 진단용이며 배포본이 아닙니다.
+
+코드에서 `ReceiverService.Start()`가 WinForms UI에서 직접 `RunAsync()`를 호출해 `WindowsFormsSynchronizationContext`를 유지하고 있었습니다. 따라서 입력 수신·마우스 버튼 해제·복귀 판정·생존 응답이 창의 UI 처리에 의존했습니다. v0.3.5는 이 루프를 `Task.Run`으로 시작하고, 수신 서비스와 암호화 채널의 비동기 I/O에 `ConfigureAwait(false)`를 적용합니다. UI 상태 표시는 기존 `BeginInvoke` 경로를 사용합니다. 프로토콜·페어링 키·포트·Mac 앱·모니터 설정은 바꾸지 않습니다.
+
+검사 명령(Windows에서만 실행, 임시 키/포트 사용):
+
+```powershell
+dotnet run -c Release --project windows/CrossMouse.Windows.App -- --receiver-ui-independence-test
+dotnet run -c Release --project windows/CrossMouse.Windows.App -- --remote-caption-test
+```
+
+두 번째 검사는 CI의 실제 커서를 잠깐 이동하고, 네이티브 X 클릭 → 숨김 → 동일 연결로 재진입 → 창 복원 → 두 번째 네이티브 X 클릭을 확인합니다. 단순 함수 호출 테스트와 구분하기 위해 네이티브 X 좌표가 확인되지 않거나 클릭이 관찰되지 않으면 실패합니다. 사용자 PC에서는 평소 실행 명령에 테스트 옵션을 붙이지 않습니다.
+
+참고: Microsoft의 [ConfigureAwait FAQ](https://devblogs.microsoft.com/dotnet/configureawait-faq/)는 UI에서 시작한 비동기 작업이 UI 컨텍스트로 돌아오는 동작을 설명합니다. CI 재현과 실제 사용자 PC의 최종 체감 확인은 서로 다릅니다.
+
 ## Windows v0.3.4 — 원격 X 클릭 후 WinForms 정지 가능성 수정
 
 **확인된 사실:** Windows에서 Mac 마우스로 CrossMouse 창의 X를 누르면 창이 숨겨지지 않고 커서가 멈추는 실기기 문제가 반복되었습니다. 기존 자동 테스트는 수신기가 연결되는지만 확인하거나, 입력 잠금 경쟁 없이 `Form.Close()`를 호출했기 때문에 이 상황을 검증하지 못했습니다.

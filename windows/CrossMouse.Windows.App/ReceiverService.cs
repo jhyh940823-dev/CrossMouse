@@ -61,7 +61,7 @@ internal sealed class ReceiverService : IAsyncDisposable
         {
             await channel.SendAsync(
                 new MouseMessage { Type = "leave" }, timeout.Token
-            );
+            ).ConfigureAwait(false);
         }
         catch (Exception error) when (
             error is IOException or OperationCanceledException or ObjectDisposedException
@@ -84,7 +84,14 @@ internal sealed class ReceiverService : IAsyncDisposable
         _listener = listener;
         _cancel = new CancellationTokenSource();
         StatusChanged?.Invoke(ReceiverState.Waiting, $"TCP {_port} · Mac 연결 대기 중");
-        _loop = RunAsync(listener, _cancel.Token);
+        // Start is invoked by the Forms Shown/Start handler. Calling an async
+        // method here directly retains WindowsFormsSynchronizationContext:
+        // network reads, mouse-up injection, rendering and pong replies would
+        // all depend on the same UI loop handling the native caption click.
+        // Capture the session token now (Stop can clear _cancel before this
+        // worker starts) and never schedule input work on the Forms thread.
+        CancellationToken token = _cancel.Token;
+        _loop = Task.Run(() => RunAsync(listener, token));
     }
 
     public async Task StopAsync()
@@ -102,7 +109,7 @@ internal sealed class ReceiverService : IAsyncDisposable
         listener.Stop();
         if (task is not null)
         {
-            try { await task; }
+            try { await task.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
         }
         _injector.ReleaseAll();
@@ -116,14 +123,14 @@ internal sealed class ReceiverService : IAsyncDisposable
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                using TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
+                using TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
                 _activeClient = client;
                 client.NoDelay = true; // No delayed ACK/Nagle on the return path.
                 try
                 {
                     await using var channel = await SecureChannel.AcceptAsync(
                         client.GetStream(), _key, cancellationToken
-                    );
+                    ).ConfigureAwait(false);
                     Volatile.Write(ref _activeChannel, channel);
                     StatusChanged?.Invoke(ReceiverState.Connected, "Mac 연결됨 · 입력 공유 준비됨");
                     using var sessionCancel =
@@ -134,7 +141,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                     {
                         while (!sessionCancel.IsCancellationRequested)
                         {
-                            var message = await channel.ReadAsync(sessionCancel.Token);
+                            var message = await channel.ReadAsync(sessionCancel.Token).ConfigureAwait(false);
                             // A TCP connection can look alive long after
                             // WinForms is hidden or a receiver stops
                             // processing messages. Prove the actual receiver
@@ -144,7 +151,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                                 await channel.SendAsync(
                                     new MouseMessage { Type = "pong" },
                                     sessionCancel.Token
-                                );
+                                ).ConfigureAwait(false);
                                 continue;
                             }
                             _injector.Apply(message);
@@ -156,7 +163,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                                 await channel.SendAsync(new MouseMessage
                                 {
                                     Type = _injector.IsRemotelyActive ? "entered" : "rejected"
-                                }, sessionCancel.Token);
+                                }, sessionCancel.Token).ConfigureAwait(false);
                             }
                         }
                     }
@@ -164,10 +171,10 @@ internal sealed class ReceiverService : IAsyncDisposable
                     {
                         sessionCancel.Cancel();
                         Volatile.Write(ref _activeChannel, null);
-                        try { await returnPoll; }
+                        try { await returnPoll.ConfigureAwait(false); }
                         catch (OperationCanceledException) { }
                         catch (IOException) { }
-                        try { await render; }
+                        try { await render.ConfigureAwait(false); }
                         catch (OperationCanceledException) { }
                         _injector.ReleaseAll();
                     }
@@ -222,9 +229,9 @@ internal sealed class ReceiverService : IAsyncDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            await Task.Delay(8, cancellationToken);
+            await Task.Delay(8, cancellationToken).ConfigureAwait(false);
             if (_injector.ReachedLeftEdge())
-                await channel.SendAsync(new MouseMessage { Type = "leave" }, cancellationToken);
+                await channel.SendAsync(new MouseMessage { Type = "leave" }, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -239,7 +246,7 @@ internal sealed class ReceiverService : IAsyncDisposable
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(8));
         try
         {
-            while (await timer.WaitForNextTickAsync(cancellationToken))
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
                 if (_injector.IsRemotelyActive)
                     resolution ??= HighResolutionTimer.TryBegin();
@@ -259,7 +266,7 @@ internal sealed class ReceiverService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await StopAsync();
+        await StopAsync().ConfigureAwait(false);
     }
 }
 
