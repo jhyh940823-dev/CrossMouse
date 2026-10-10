@@ -21,8 +21,13 @@ internal sealed class InputDesktopAccess : IDisposable
 
     internal static InputDesktopAccess Enter(bool createsWindow = false)
     {
-        uint access = 0x0001 | 0x0080; // READOBJECTS | WRITEOBJECTS
-        if (createsWindow) access |= 0x0002; // CREATEWINDOW only for the pointer surface
+        // READOBJECTS | WRITEOBJECTS | JOURNALPLAYBACK. SendInput checks input
+        // playback access after SetThreadDesktop; read/write alone can bind
+        // successfully yet reject input with ERROR_ACCESS_DENIED. The isolated
+        // SYSTEM desktop regression measured 0x81 => rejected, 0xA1 => accepted.
+        // Request no SWITCHDESKTOP, security-descriptor write, or ownership right.
+        uint access = 0x0001 | 0x0080 | 0x0020;
+        if (createsWindow) access |= 0x0002;
         nint desktop = OpenInputDesktop(0, false, access);
         if (desktop == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "input-desktop-access-denied");
         try
