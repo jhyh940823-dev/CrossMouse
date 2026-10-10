@@ -102,6 +102,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var monitorStatus = "DDC 입력 전환은 확인 후에만 활성화할 수 있습니다."
     private var automaticHandoff = AutomaticHandoff()
     private var requestedMacDisplay = false
+    private var displayReturnShortcut = DisplayReturnShortcut()
     private var pointerMotion = PointerMotionScale(percent:
         (UserDefaults.standard.object(forKey: "CrossMouse.windowsPointerSpeedPercent") as? NSNumber)?.doubleValue
             ?? PointerMotionScale.defaultPercent)
@@ -329,7 +330,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         )
         returnItem.target = self
         menu.addItem(returnItem)
-        let dviReturn = NSMenuItem(title: "필립스를 Mac 화면(DVI)으로 · Ctrl+Alt+Shift+D",
+        let dviReturn = NSMenuItem(title: "필립스를 Mac 화면(DVI)으로 · F8",
                                   action: #selector(requestMacDisplay), keyEquivalent: "")
         dviReturn.target = self
         menu.addItem(dviReturn)
@@ -424,7 +425,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         hotCornerGate.reset()
         hotCornerHUD.hide()
         monitorStatus = autoInputSwitch
-            ? "오른쪽 위 1.25초 → HDMI. 이후 좌우 커서 이동은 HDMI를 유지합니다. DVI 복귀: Ctrl+Alt(Option)+Shift+D."
+            ? "오른쪽 위 1.25초 → HDMI. 이후 좌우 커서 이동은 HDMI를 유지합니다. F8 한 번 → Mac 화면(DVI)."
             : "자동 입력 전환 꺼짐. HDMI와 DVI 시험 모두 성공 확인 후 켤 수 있습니다."
         updateMenu()
     }
@@ -850,18 +851,27 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             // The keyboard and pointer must never remain remotely controlled
             // without a working interception tap.
             if remoteActive { forceReturn() }
+            displayReturnShortcut.reset()
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        if type == .keyDown || type == .keyUp {
+            let modifiers: CGEventFlags = [.maskControl, .maskAlternate, .maskShift, .maskCommand]
+            let decision = displayReturnShortcut.handle(
+                keyCode: keyCode, down: type == .keyDown,
+                isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+                hasModifiers: !event.flags.intersection(modifiers).isEmpty,
+                enabled: verifiedDVI && (windowsReady || automaticHandoff.inProgress || requestedMacDisplay)
+            )
+            switch decision {
+            case .requestDVI: requestMacDisplay(); return nil
+            case .consume: return nil
+            case .pass: break
+            }
+        }
         let shortcutFlags: CGEventFlags = [.maskControl, .maskAlternate, .maskShift]
         if type == .keyDown && event.flags.intersection(shortcutFlags) == shortcutFlags {
-            if keyCode == 2 { // physical D key: works with Korean/English layout
-                if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-                    requestMacDisplay()
-                }
-                return nil
-            }
             if keyCode == 53 { // Ctrl+Option+Shift+Escape: emergency local return.
                 forceReturn()
                 return nil

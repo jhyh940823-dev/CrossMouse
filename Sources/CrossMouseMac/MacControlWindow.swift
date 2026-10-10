@@ -117,7 +117,7 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         pointerSpeedRow.spacing = 12
         pointerSpeedSlider.widthAnchor.constraint(equalToConstant: 230).isActive = true
         pointerSpeedValue.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        let dviHint = text("DVI 복귀 단축키: Ctrl + Alt(Option) + Shift + D\n왼쪽 경계에서는 커서만 Mac으로 이동하고 Windows 화면은 유지됩니다.", size: 12)
+        let dviHint = text("F8 한 번 → 필립스를 Mac 화면(DVI)으로\n왼쪽 경계에서는 커서만 Mac으로 이동하고 Windows 화면은 유지됩니다.", size: 12)
         dviHint.textColor = .secondaryLabelColor
         loginCheck.target = self
         loginCheck.action = #selector(toggleLoginItem)
