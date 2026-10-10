@@ -21,7 +21,11 @@ internal sealed class InputDesktopAccess : IDisposable
 
     internal static InputDesktopAccess Enter(bool createsWindow = false)
     {
-        uint access = 0x0001 | 0x0080; // READOBJECTS | WRITEOBJECTS
+        // The injection worker needs playback access as well as object access.
+        // Binding a READ/WRITEOBJECTS-only handle can succeed while SendInput
+        // subsequently returns AccessDenied on a different input desktop.
+        // Request the operation's right; never grant it by modifying any ACL.
+        uint access = 0x0001 | 0x0080 | 0x0020; // READOBJECTS | WRITEOBJECTS | JOURNALPLAYBACK
         if (createsWindow) access |= 0x0002; // CREATEWINDOW only for the pointer surface
         nint desktop = OpenInputDesktop(0, false, access);
         if (desktop == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "input-desktop-access-denied");
