@@ -32,9 +32,19 @@ internal sealed class CrossMouseWindow : Form
     private readonly byte[]? _pairingKey;
     private bool _closing;
 
-    public CrossMouseWindow()
+    // Unlike ordinary Close(), only QuitAsync is allowed to destroy the main
+    // form. Application.Run(form) would otherwise exit and kill the receiver.
+    // Tests inject a temporary key/ephemeral port instead of touching the
+    // user's saved pairing key or an existing live TCP listener.
+    internal bool ReceiverRunningForTest => _receiver?.IsRunning ?? false;
+    internal int ListeningPortForTest => _receiver?.ListeningPort ?? 0;
+    internal void RestoreForTest() => RestoreWindow();
+    internal Task QuitForTestAsync() => QuitAsync();
+
+    public CrossMouseWindow(byte[]? selfTestKey = null, int port = 49431)
     {
-        Text = "CrossMouse - Windows";
+        string version = typeof(CrossMouseWindow).Assembly.GetName().Version?.ToString(3) ?? "unknown";
+        Text = $"CrossMouse - Windows v{version}";
         ClientSize = new Size(540, 435);
         MinimumSize = new Size(510, 450);
         MaximumSize = new Size(770, 600);
@@ -49,8 +59,8 @@ internal sealed class CrossMouseWindow : Form
         );
         try
         {
-            _pairingKey = LoadOrCreateKey(_keyPath);
-            _receiver = new ReceiverService(_pairingKey);
+            _pairingKey = selfTestKey ?? LoadOrCreateKey(_keyPath);
+            _receiver = new ReceiverService(_pairingKey, port);
             _receiver.StatusChanged += UpdateStatus;
         }
         catch (Exception error)
@@ -60,7 +70,7 @@ internal sealed class CrossMouseWindow : Form
             _start.Enabled = false;
         }
 
-        var title = NewLabel("CrossMouse", 23, true);
+        var title = NewLabel($"CrossMouse v{version}", 23, true);
         var subtitle = NewLabel("Windows PC · 입력 수신기", 10);
         subtitle.ForeColor = SystemColors.GrayText;
         var address = NewLabel($"이 PC 주소: {LocalAddresses()}    ·    TCP 49431", 10);
@@ -129,7 +139,7 @@ internal sealed class CrossMouseWindow : Form
         _tray = new NotifyIcon
         {
             Icon = SystemIcons.Application,
-            Text = "CrossMouse (Windows)",
+            Text = $"CrossMouse v{version} (Windows)",
             Visible = true,
             ContextMenuStrip = trayMenu
         };
@@ -310,10 +320,16 @@ internal sealed class CrossMouseWindow : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!_closing && e.CloseReason == CloseReason.UserClosing)
+        // Every ordinary Close path, including taskbar/window chrome, must
+        // hide the window. The explicit Quit button/tray action is the only
+        // way to stop the input receiver during an ordinary desktop session.
+        // Never block actual Windows shutdown or Task Manager termination.
+        if (!_closing && e.CloseReason != CloseReason.WindowsShutDown &&
+            e.CloseReason != CloseReason.TaskManagerClosing)
         {
             e.Cancel = true;
             Hide();
+            _tray.Visible = true;
             return;
         }
         // Session shutdown isn't an ordinary user close: let Windows exit.

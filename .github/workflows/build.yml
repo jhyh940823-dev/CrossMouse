@@ -34,6 +34,8 @@ jobs:
         run: dotnet build windows/CrossMouse.Windows.App/CrossMouse.Windows.App.csproj -c Release
       - name: Windows GUI receiver start/handshake/stop smoke test
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --service-self-test
+      - name: Windows GUI X-to-tray and background receiver smoke test
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --gui-self-test
       - name: Protocol self-tests
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows -- --self-test
       - name: Publish Windows standalone receiver
