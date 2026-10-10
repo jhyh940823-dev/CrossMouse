@@ -99,6 +99,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var automaticHandoff = AutomaticHandoff()
     private var peerCapability: String?
     private var peerVersion = "확인되지 않음"
+    private let physicalPointer = MacPhysicalPointer()
     private var launchedInBackground = false
 
     init(options: Options) {
@@ -195,6 +196,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         )
         network.start()
         installEventTap()
+        physicalPointer.onMotion = { [weak self] dx, dy in
+            guard let self, self.remoteActive, self.automaticHandoff.ownsInput else { return }
+            self.sendInput(CrossMouseMessage(type: "move", dx: dx, dy: dy))
+        }
+        physicalPointer.start()
         updateMenu()
         refreshLoginItemStatus()
         if !launchedInBackground { controlWindow.show() }
@@ -217,6 +223,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         network?.send(CrossMouseMessage(type: "leave"))
         network?.stop()
+        physicalPointer.stop()
         reclaimMac()
         hotCornerTimer?.invalidate()
         heartbeatTimer?.invalidate()
@@ -494,6 +501,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 updateMenu()
                 return
             }
+            guard physicalPointer.canCapture else {
+                monitorStatus = "자동 전환에 사용할 물리 마우스 입력을 확인하지 못했습니다. 동글 연결과 입력 권한을 확인하세요."
+                updateMenu()
+                return
+            }
             guard let id = automaticHandoff.begin(now: ProcessInfo.processInfo.systemUptime) else { return }
             monitorStatus = "Windows의 대상 화면과 입력 준비를 확인하는 중…"
             traceTransfer("prepare", id: id)
@@ -549,6 +561,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             remoteCursorAnchor = anchor
             windowsReady = true
             remoteActive = true
+            physicalPointer.beginCapture()
             awaitingEnterAt = nil
             transferAttempts += 1
             lastTransfer = "Windows ownership and cursor presentation confirmed"
@@ -722,6 +735,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func reclaimMac() {
+        physicalPointer.endCapture()
         awaitingEnterAt = nil
         guard remoteActive else { return }
         remoteActive = false
@@ -800,7 +814,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let dx = Int(event.getIntegerValueField(.mouseEventDeltaX))
             let dy = Int(event.getIntegerValueField(.mouseEventDeltaY))
-            if dx != 0 || dy != 0 {
+            if !automaticHandoff.ownsInput && (dx != 0 || dy != 0) {
                 sendInput(CrossMouseMessage(type: "move", dx: dx, dy: dy))
             }
             // Returning nil prevents local app delivery, but not all pointer
