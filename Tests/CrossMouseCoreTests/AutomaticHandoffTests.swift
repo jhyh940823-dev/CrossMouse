@@ -24,14 +24,15 @@ final class AutomaticHandoffTests: XCTestCase {
         XCTAssertTrue(state.prepared("new", now: 1))
         XCTAssertTrue(state.switched("new", now: 2))
         XCTAssertTrue(state.acquired("new", visible: true, now: 3))
-        XCTAssertFalse(state.returning(nil, reason: "left-edge", now: 4))
-        XCTAssertFalse(state.returning("old", reason: "left-edge", now: 4))
-        XCTAssertFalse(state.returning("new", reason: "idle", now: 4))
+        XCTAssertFalse(state.releaseInput(nil, reason: "left-edge", now: 4))
+        XCTAssertFalse(state.releaseInput("old", reason: "left-edge", now: 4))
+        XCTAssertFalse(state.releaseInput("new", reason: "idle", now: 4))
         XCTAssertTrue(state.ownsInput)
-        XCTAssertTrue(state.returning("new", reason: "left-edge", now: 5))
-        XCTAssertFalse(state.returned("old"))
-        XCTAssertTrue(state.returned("new"))
+        XCTAssertTrue(state.releaseInput("new", reason: "left-edge", now: 5))
         XCTAssertEqual(state.phase, .local)
+        XCTAssertEqual(state.displayInput, .windowsHDMI)
+        XCTAssertTrue(state.canEnterFromSamsung)
+        XCTAssertFalse(state.returned("new")) // a leave is not a video command
     }
     func testCancelledDDCCompletionCannotAcquireOrFinishNewTransaction() {
         var state = AutomaticHandoff()

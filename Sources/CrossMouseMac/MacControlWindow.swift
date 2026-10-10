@@ -11,6 +11,8 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     var onHDMITest: (() -> Void)?
     var onDVITest: (() -> Void)?
     var onAutoSwitch: ((Bool) -> Void)?
+    var onDVIRequest: (() -> Void)?
+    var onPointerSpeed: ((Double) -> Void)?
     var onLoginItem: ((Bool) -> Void)?
     var onLoginSettings: (() -> Void)?
 
@@ -29,6 +31,9 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         target: nil, action: nil
     )
     private let monitorStatusLabel = NSTextField(labelWithString: "")
+    private let dviRequestButton = NSButton(title: "필립스를 Mac 화면(DVI)으로", target: nil, action: nil)
+    private let pointerSpeedSlider = NSSlider(value: 50, minValue: 25, maxValue: 150, target: nil, action: nil)
+    private let pointerSpeedValue = NSTextField(labelWithString: "50%")
     private let loginCheck = NSButton(
         checkboxWithTitle: "Mac 로그인 시 자동 실행", target: nil, action: nil
     )
@@ -37,13 +42,13 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
 
     init() {
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 565, height: 540),
+            contentRect: CGRect(x: 0, y: 0, width: 590, height: 640),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "CrossMouse v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")
-        window.minSize = NSSize(width: 550, height: 525)
+        window.minSize = NSSize(width: 565, height: 630)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         placeOnSamsung()
@@ -96,6 +101,24 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         monitorStatusLabel.textColor = .secondaryLabelColor
         monitorStatusLabel.maximumNumberOfLines = 0
         monitorStatusLabel.lineBreakMode = .byWordWrapping
+        dviRequestButton.target = self
+        dviRequestButton.action = #selector(requestDVI)
+        dviRequestButton.bezelStyle = .rounded
+        pointerSpeedSlider.target = self
+        pointerSpeedSlider.action = #selector(changePointerSpeed)
+        pointerSpeedSlider.isContinuous = true
+        pointerSpeedSlider.setAccessibilityLabel("Windows 커서 속도(%)")
+        pointerSpeedSlider.toolTip = "Windows로 보내는 마우스 이동량만 조절합니다. 100%는 v0.4.0의 원래 속도입니다."
+        pointerSpeedValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        pointerSpeedValue.alignment = .right
+        let pointerSpeedTitle = text("Windows 커서 속도", size: 12)
+        let pointerSpeedRow = NSStackView(views: [pointerSpeedTitle, pointerSpeedSlider, pointerSpeedValue])
+        pointerSpeedRow.orientation = .horizontal
+        pointerSpeedRow.spacing = 12
+        pointerSpeedSlider.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        pointerSpeedValue.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        let dviHint = text("DVI 복귀 단축키: Ctrl + Alt(Option) + Shift + D\n왼쪽 경계에서는 커서만 Mac으로 이동하고 Windows 화면은 유지됩니다.", size: 12)
+        dviHint.textColor = .secondaryLabelColor
         loginCheck.target = self
         loginCheck.action = #selector(toggleLoginItem)
         loginCheck.font = .systemFont(ofSize: 12)
@@ -128,7 +151,8 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         let stack = NSStackView(views: [
             title, subtitle, statusLabel, section, modeRow,
             modeDescription, diagnosticsLabel, ddcRow,
-            autoSwitchCheck, monitorStatusLabel, loginRow, loginStatusLabel,
+            autoSwitchCheck, monitorStatusLabel, pointerSpeedRow, dviRequestButton, dviHint,
+            loginRow, loginStatusLabel,
             actionRow, noteLabel
         ])
         stack.orientation = .vertical
@@ -151,6 +175,11 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         loginStatusLabel.stringValue = message
     }
 
+    func renderPointerSpeed(_ percent: Double) {
+        pointerSpeedSlider.doubleValue = percent
+        pointerSpeedValue.stringValue = "\(Int(percent))%"
+    }
+
     func render(connected: Bool, connecting: Bool, windowsMode: Bool,
                 captureStatus: String, receiverResponsive: Bool = false,
                 autoVerified: Bool = false,
@@ -165,13 +194,14 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         connectionButton.title = connecting ? "연결 중지" : "연결 시작"
         modeDescription.stringValue = windowsMode
             ? (receiverResponsive
-                ? "삼성 오른쪽 끝 → 필립스 Windows, 왼쪽 끝 → Mac 복귀"
+                ? "삼성 ↔ 필립스: 커서만 좌우 이동 · 필립스 Windows 화면 유지"
                 : "안전 대기: Windows 앱이 응답할 때까지 마우스 전환이 차단됩니다.")
             : "Mac 듀얼 화면: 삼성에서 필립스로 커서가 정상 이동합니다."
         diagnosticsLabel.stringValue = captureStatus
         ddcTestButton.isEnabled = !monitorBusy
         ddcReturnButton.isEnabled = !monitorBusy
         autoSwitchCheck.isEnabled = autoVerified && !monitorBusy
+        dviRequestButton.isEnabled = autoVerified && !monitorBusy
         autoSwitchCheck.state = autoVerified && autoEnabled ? .on : .off
         monitorStatusLabel.stringValue = monitorStatus.isEmpty
             ? "모니터 입력 자동 전환은 시험 성공 확인 후 사용할 수 있습니다."
@@ -220,6 +250,8 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     @objc private func toggleAutoSwitch() {
         onAutoSwitch?(autoSwitchCheck.state == .on)
     }
+    @objc private func requestDVI() { onDVIRequest?() }
+    @objc private func changePointerSpeed() { onPointerSpeed?(pointerSpeedSlider.doubleValue) }
     @objc private func toggleLoginItem() { onLoginItem?(loginCheck.state != .off) }
     @objc private func openLoginSettings() { onLoginSettings?() }
 }

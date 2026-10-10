@@ -1,9 +1,10 @@
 import Foundation
 
-/// One owner of an automatic monitor/input transaction. Sending a command
-/// never implies that video changed or that Windows owns the input. Replies
-/// from a cancelled/previous transaction have no authority over the next one.
+/// Display selection and input ownership are independent. Returning the cursor
+/// to Samsung does NOT change Philips' input. Only an explicit display-return
+/// request may enter switchingToMac. Each acquisition still has a fresh ID.
 public struct AutomaticHandoff: Sendable {
+    public enum DisplayInput: Equatable, Sendable { case macDVI, windowsHDMI }
     public enum Phase: Equatable, Sendable {
         case local
         case preparing(String)
@@ -13,7 +14,10 @@ public struct AutomaticHandoff: Sendable {
         case switchingToMac(String)
     }
     public private(set) var phase: Phase = .local
+    public private(set) var displayInput: DisplayInput = .macDVI
     public private(set) var changedAt: TimeInterval = 0
+    public private(set) var switchesDisplayOnEntry = true
+    public private(set) var entryFractionY: Double = 0.5
     public init() {}
     public var id: String? {
         switch phase {
@@ -24,32 +28,50 @@ public struct AutomaticHandoff: Sendable {
     }
     public var ownsInput: Bool { if case .windows = phase { true } else { false } }
     public var inProgress: Bool { phase != .local }
+    public var canEnterFromSamsung: Bool { displayInput == .windowsHDMI && phase == .local }
+
+    /// Records a user-confirmed input or the completion of our serialized DDC
+    /// write. It does not grant input ownership, even if an old write completed.
+    public mutating func selectDisplay(_ input: DisplayInput) { displayInput = input }
 
     @discardableResult
-    public mutating func begin(id: String = UUID().uuidString, now: TimeInterval) -> String? {
-        guard phase == .local else { return nil }
+    public mutating func begin(id: String = UUID().uuidString, switchDisplay: Bool = true,
+                              fractionY: Double = 0.5, now: TimeInterval) -> String? {
+        guard phase == .local, switchDisplay || displayInput == .windowsHDMI else { return nil }
+        switchesDisplayOnEntry = switchDisplay
+        entryFractionY = fractionY.isFinite ? min(1, max(0, fractionY)) : 0.5
         phase = .preparing(id); changedAt = now; return id
     }
     public mutating func prepared(_ replyID: String?, now: TimeInterval) -> Bool {
         guard case .preparing(let id) = phase, replyID == id else { return false }
-        phase = .switchingToWindows(id); changedAt = now; return true
+        // Crossing back from Samsung requires input readiness, NOT another
+        // video command, dwell timer, or flicker of the Philips panel.
+        phase = switchesDisplayOnEntry ? .switchingToWindows(id) : .acquiring(id)
+        changedAt = now; return true
     }
     public mutating func switched(_ replyID: String?, now: TimeInterval) -> Bool {
         guard case .switchingToWindows(let id) = phase, replyID == id else { return false }
+        displayInput = .windowsHDMI
         phase = .acquiring(id); changedAt = now; return true
     }
     public mutating func acquired(_ replyID: String?, visible: Bool, now: TimeInterval) -> Bool {
         guard case .acquiring(let id) = phase, replyID == id, visible else { return false }
         phase = .windows(id); changedAt = now; return true
     }
-    public mutating func returning(_ replyID: String?, reason: String?, now: TimeInterval) -> Bool {
+    public mutating func releaseInput(_ replyID: String?, reason: String?, now: TimeInterval) -> Bool {
         guard case .windows(let id) = phase, replyID == id,
               reason == "left-edge" || reason == "window-close" else { return false }
-        phase = .switchingToMac(id); changedAt = now; return true
+        phase = .local; changedAt = now; return true
+    }
+    /// Call only for an explicit button/shortcut, after releasing input. Neither
+    /// a peer's leave message nor inactivity can request a DVI command.
+    public mutating func requestMacDisplay(id: String = UUID().uuidString, now: TimeInterval) -> String? {
+        guard phase == .local else { return nil }
+        phase = .switchingToMac(id); changedAt = now; return id
     }
     public mutating func returned(_ replyID: String?) -> Bool {
         guard case .switchingToMac(let id) = phase, replyID == id else { return false }
-        phase = .local; return true
+        displayInput = .macDVI; phase = .local; return true
     }
     @discardableResult
     public mutating func cancel() -> String? { let old = id; phase = .local; return old }
