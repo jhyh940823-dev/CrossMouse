@@ -68,6 +68,10 @@ jobs:
         if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
         timeout-minutes: 2
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --reliability-test
+      - name: Visible pointer on real Chrome and native folder picker
+        if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
+        timeout-minutes: 2
+        run: dotnet run -c Release --project windows/CrossMouse.PointerIntegration
       - name: Cursor render evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4

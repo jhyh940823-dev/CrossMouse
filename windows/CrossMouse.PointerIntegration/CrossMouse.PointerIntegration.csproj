@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RootNamespace>CrossMouse.Windows.App</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../CrossMouse.Windows.App/PointerPresenter.cs" Link="Production/PointerPresenter.cs" />
+    <Compile Include="../CrossMouse.Windows.App/CursorRaster.cs" Link="Production/CursorRaster.cs" />
+    <Compile Include="../CrossMouse.Windows.App/LayeredCursorImage.cs" Link="Production/LayeredCursorImage.cs" />
+    <Compile Include="../CrossMouse.Windows/InputInjector.cs" Link="Production/InputInjector.cs" />
+    <Compile Include="../CrossMouse.Windows/InputDesktopAccess.cs" Link="Production/InputDesktopAccess.cs" />
+    <Compile Include="../CrossMouse.Windows/MotionSmoother.cs" Link="Production/MotionSmoother.cs" />
+    <Compile Include="../CrossMouse.Windows/WireProtocol.cs" Link="Production/WireProtocol.cs" />
+    <Compile Include="../CrossMouse.Windows/KeyMapping.cs" Link="Production/KeyMapping.cs" />
+  </ItemGroup>
+</Project>
