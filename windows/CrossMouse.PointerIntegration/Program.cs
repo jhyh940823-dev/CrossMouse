@@ -28,7 +28,7 @@ internal static class Program
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         var token = timeout.Token;
         string? chrome = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolderProgramFilesX86()),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) }
             .Select(root => Path.Combine(root, "Google", "Chrome", "Application", "chrome.exe")).FirstOrDefault(File.Exists);
         if (chrome is null) throw new FileNotFoundException("Integration runner must contain Chrome; not silently skipped.");
