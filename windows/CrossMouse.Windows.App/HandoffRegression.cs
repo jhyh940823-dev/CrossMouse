@@ -66,6 +66,17 @@ internal static class HandoffRegression
                 "return not identified with owner and actual reason");
             Console.WriteLine("PASS idle preserved; actual left move returns with matching ID/reason");
 
+            string reopened = Guid.NewGuid().ToString();
+            await Prepare(peer, reopened, token);
+            await peer.SendAsync(new MouseMessage { Type="enter", TransferId=reopened, CenterCursor=true }, token);
+            entered = await peer.ReadAsync(token);
+            Require(entered.Type == "entered" && entered.TransferId == reopened, "re-entry not acknowledged");
+            await receiver.ReturnCursorToMacAsync();
+            leave = await peer.ReadAsync(token);
+            Require(leave.Type == "leave" && leave.TransferId == reopened && leave.Reason == "window-close" &&
+                !receiver.IsRemotelyActive, "window close did not release its exact owner");
+            Console.WriteLine("PASS settings close releases matching automatic owner and keeps receiver alive");
+
             bool active = true;
             nint foreground = GetForegroundWindow();
             using var presenter = new PointerPresenter(() => active, simulateHiddenNativePointerForTest: true);

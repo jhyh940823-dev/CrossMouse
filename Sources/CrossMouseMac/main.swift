@@ -518,6 +518,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         if let id = automaticHandoff.cancel() {
             traceTransfer("cancel", id: id)
             network?.send(CrossMouseMessage(type: "leave", transferId: id, reason: "cancel"))
+            // A cancelled automatic transfer must not silently turn into the
+            // legacy Samsung-edge route and bypass preparation/ownership.
+            windowsReady = false
             reclaimMac()
         }
     }
