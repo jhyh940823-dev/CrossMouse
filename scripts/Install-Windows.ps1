@@ -8,12 +8,14 @@ param(
     [string]$StagingPath,
     [string]$PairingKeyPath,
     [string]$OwnerSid,
+    [string]$ExpectedHash,
     [int]$Port = 49431
 )
 $ErrorActionPreference = 'Stop'
 $serviceName = 'CrossMouseInput'
 $root = Join-Path $env:ProgramFiles 'CrossMouse'
 $dataRoot = Join-Path $env:ProgramData 'CrossMouse'
+$credentials = Join-Path $dataRoot 'credentials'
 $exe = Join-Path $root 'CrossMouse.exe'
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -21,7 +23,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 function Check-NativeResult([string]$operation) {
     if ($LASTEXITCODE -ne 0) { throw "$operation failed (exit $LASTEXITCODE)." }
 }
-function Protect-Directory([string]$path) {
+function Protect-Directory([string]$path, [switch]$Private) {
     if (Test-Path -LiteralPath $path) {
         if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "Refusing reparse-point installation directory: $path"
@@ -34,8 +36,10 @@ function Protect-Directory([string]$path) {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
             [Security.Principal.SecurityIdentifier]$sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     }
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
-        [Security.Principal.SecurityIdentifier]'S-1-5-32-545', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    if (!$Private) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            [Security.Principal.SecurityIdentifier]'S-1-5-32-545', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
     Set-Acl -LiteralPath $path -AclObject $acl
 }
 function Protect-Key([string]$path) {
@@ -73,6 +77,42 @@ function Stop-OwnedApps {
         }
     }
 }
+function Protect-Tree([string]$path, [bool]$Private = $false) {
+    if ($path -ieq $credentials) { $Private = $true }
+    Protect-Directory $path -Private:$Private
+    # Enumerate one level at a time. Never follow a junction while recursively
+    # looking for junctions, and never retain an old writable child ACL.
+    foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) {
+        if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing reparse point: $($child.FullName)" }
+        if ($child.PSIsContainer) { Protect-Tree $child.FullName $Private }
+        elseif ($Private -or $child.FullName -ieq (Join-Path $dataRoot 'key')) { Protect-Key $child.FullName }
+        else { Protect-ReadOnlyFile $child.FullName }
+    }
+}
+function Assert-TrustedRoot([string]$path) {
+    if (!(Test-Path -LiteralPath $path)) { return }
+    $item = Get-Item -LiteralPath $path -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing reparse-point root: $path" }
+    $acl = Get-Acl -LiteralPath $path
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @('S-1-5-18','S-1-5-32-544')) { throw "Refusing a service directory owned by an untrusted principal: $path" }
+    $write = [Security.AccessControl.FileSystemRights]'Write,Modify,Delete,ChangePermissions,TakeOwnership'
+    foreach ($entry in $acl.Access) {
+        $sid = $entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($entry.AccessControlType -eq 'Allow' -and $sid -notin @('S-1-5-18','S-1-5-32-544') -and
+            ($entry.FileSystemRights -band $write)) { throw "Refusing a writable pre-existing service directory: $path" }
+    }
+}
+function Open-InstalledControls {
+    $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+    if ($desktop) {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut((Join-Path $desktop 'CrossMouse.lnk'))
+        $shortcut.TargetPath = $exe; $shortcut.WorkingDirectory = $root
+        $shortcut.Save()
+    }
+    Start-Process $exe
+}
 
 if ($Port -lt 1024 -or $Port -gt 65535) { throw 'Invalid TCP port.' }
 if ($CiTest -and $env:GITHUB_ACTIONS -ne 'true') { throw '-CiTest is reserved for the isolated CI runner.' }
@@ -94,6 +134,7 @@ if (!$ElevatedStage) {
     & dotnet publish $project -c Release -r win-x64 --self-contained true `
         -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $StagingPath
     Check-NativeResult 'CrossMouse build'
+    $ExpectedHash = (Get-FileHash -LiteralPath (Join-Path $StagingPath 'CrossMouse.exe') -Algorithm SHA256).Hash
     if ($BuildOnly) { Write-Host "Built, not installed: $StagingPath"; return }
     if (!$InstallService) {
         Start-Process (Join-Path $StagingPath 'CrossMouse.exe')
@@ -117,9 +158,10 @@ if (!$ElevatedStage) {
         Write-Host 'The paired Mac can then type into sign-in and UAC. Passwords, UAC and antivirus stay enabled.'
         $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" -InstallService -ElevatedStage' +
             ' -StagingPath "' + $StagingPath + '" -PairingKeyPath "' + $PairingKeyPath + '" -OwnerSid "' + $OwnerSid + '" -Port ' + $Port
+        $arguments += ' -ExpectedHash ' + $ExpectedHash
         $child = Start-Process powershell.exe -ArgumentList $arguments -Verb RunAs -Wait -PassThru
         if ($child.ExitCode -ne 0) { throw 'Service installation did not complete. Existing build and settings were preserved.' }
-        Start-Process $exe
+        Open-InstalledControls
         return
     }
 }
@@ -130,6 +172,10 @@ $owner = New-Object Security.Principal.SecurityIdentifier($OwnerSid)
 if (!$owner.IsAccountSid()) { throw 'The pipe owner must be a user account SID.' }
 $sourceExe = Join-Path $StagingPath 'CrossMouse.exe'
 if (!(Test-Path -LiteralPath $sourceExe)) { throw 'Built CrossMouse executable is missing.' }
+if ($ExpectedHash -notmatch '^[0-9a-fA-F]{64}$' -or
+    (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash -ine $ExpectedHash) {
+    throw 'The built executable changed before administrator installation.'
+}
 $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($sourceExe)
 if ($version.ProductName -ne 'CrossMouse' -or $version.FileMajorPart -ne 0 -or $version.FileMinorPart -ne 5) {
     throw 'This installer accepts only the CrossMouse 0.5 build it created.'
@@ -137,13 +183,20 @@ if ($version.ProductName -ne 'CrossMouse' -or $version.FileMajorPart -ne 0 -or $
 $pairing = [IO.File]::ReadAllText($PairingKeyPath).Trim()
 if ($pairing -notmatch '^[0-9a-fA-F]{64}$') { throw 'Pairing key must be exactly 32 bytes.' }
 
-Protect-Directory $root
-Protect-Directory $dataRoot
+Assert-TrustedRoot $root
+Assert-TrustedRoot $dataRoot
+Protect-Tree $root
+Protect-Tree $dataRoot
+Protect-Directory $credentials -Private
 Protect-Directory (Join-Path $dataRoot 'bundles')
-if (Get-ChildItem -LiteralPath $root -Force -Recurse | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) {
-    throw 'Refusing to update an installation containing a reparse point.'
+$keyPath = Join-Path $credentials 'key'
+if ((Test-Path -LiteralPath $keyPath) -and [IO.File]::ReadAllText($keyPath).Trim() -ine $pairing) {
+    throw 'Existing protected pairing differs. Refusing an implicit re-pair.'
 }
+$configPath = Join-Path $dataRoot 'service.json'
+$oldConfig = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllBytes($configPath) } else { $null }
 $oldService = Get-Service $serviceName -ErrorAction SilentlyContinue
+$wasRunning = $oldService -and $oldService.Status -ne 'Stopped'
 if ($oldService -and $oldService.Status -ne 'Stopped') {
     Stop-Service $serviceName; $oldService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
 }
@@ -155,9 +208,13 @@ if (Test-Path -LiteralPath $exe) {
     Copy-Item -LiteralPath $exe -Destination (Join-Path $backup 'CrossMouse.exe')
 }
 try {
-    Copy-Item -LiteralPath $sourceExe -Destination $exe -Force
+    $newExe = Join-Path $root ('install-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    Copy-Item -LiteralPath $sourceExe -Destination $newExe
+    Protect-ReadOnlyFile $newExe
+    if ((Get-FileHash -LiteralPath $newExe -Algorithm SHA256).Hash -ine $ExpectedHash) { throw 'Staged binary changed during copy.' }
+    if (Test-Path -LiteralPath $exe) { [IO.File]::Replace($newExe, $exe, $null) }
+    else { [IO.File]::Move($newExe, $exe) }
     Protect-ReadOnlyFile $exe
-    $keyPath = Join-Path $dataRoot 'key'
     if (Test-Path -LiteralPath $keyPath) {
         if ([IO.File]::ReadAllText($keyPath).Trim() -ine $pairing) { throw 'Existing protected pairing differs. Refusing an implicit re-pair.' }
     } else { [IO.File]::WriteAllText($keyPath, $pairing) }
@@ -193,16 +250,39 @@ try {
     }
     Start-Service $serviceName
     (Get-Service $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(15))
+    $startedAt = [DateTime]::UtcNow.AddSeconds(-3)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $healthy = $false
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            $status = Get-Content -LiteralPath (Join-Path $dataRoot 'status.json') -Raw | ConvertFrom-Json
+            if ([DateTime]$status.UpdatedUtc -ge $startedAt -and $status.SessionId -gt 0 -and
+                $status.Version -eq '0.5.0' -and $status.State -in @('Waiting', 'Connected')) { $healthy = $true; break }
+        } catch { }
+        Start-Sleep -Milliseconds 250
+    }
+    if (!$healthy) {
+        $lastError = Join-Path $dataRoot 'last-error.txt'
+        if (Test-Path $lastError) { Get-Content $lastError | Write-Host }
+        throw 'The service started but its interactive input agent did not become ready. Installation will roll back.'
+    }
     Write-Host "Installed: $exe"
     Write-Host 'Boot service is running. The paired Mac must still be signed in and connected to the local network.'
     Write-Host 'This does not automate Windows PIN/password entry or disable UAC.'
     if ($backup) { Write-Host "Rollback executable: $backup" }
+    if (!$CiTest -and !$ElevatedStage) { Open-InstalledControls }
 } catch {
+    Stop-Service $serviceName -ErrorAction SilentlyContinue
+    if (!$oldService -and (Get-Service $serviceName -ErrorAction SilentlyContinue)) {
+        & sc.exe delete $serviceName | Out-Host
+        Remove-NetFirewallRule -Name 'CrossMouse-Input-LAN' -ErrorAction SilentlyContinue
+    }
+    if ($oldConfig) { [IO.File]::WriteAllBytes($configPath, $oldConfig) }
+    elseif (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath }
     if ($backup) {
-        Stop-Service $serviceName -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 800
         Copy-Item -LiteralPath (Join-Path $backup 'CrossMouse.exe') -Destination $exe -Force
-        if ($oldService) { Start-Service $serviceName -ErrorAction SilentlyContinue }
+        if ($wasRunning) { Start-Service $serviceName -ErrorAction SilentlyContinue }
     }
     throw
 }

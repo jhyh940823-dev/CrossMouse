@@ -192,7 +192,7 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
                 "TCP 연결됨 · Windows 수신기 응답 없음 (Windows 앱 버전 확인)") :
                 "Windows 연결 대기 중…"
         connectionButton.title = connecting ? "연결 중지" : "연결 시작"
-        modeDescription.stringValue = windowsMode
+        modeDescription.stringValue = !displayKnown ? "영상 입력 확인 중 · 필요하면 F8로 필립스를 Mac 화면으로 돌릴 수 있습니다." : windowsMode
             ? (receiverResponsive
                 ? "삼성 ↔ 필립스: 커서만 좌우 이동 · 필립스 Windows 화면 유지"
                 : "안전 대기: Windows 앱이 응답할 때까지 마우스 전환이 차단됩니다.")

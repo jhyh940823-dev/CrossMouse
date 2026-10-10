@@ -14,7 +14,7 @@ try {
     }
     $state = Get-Content $status -Raw | ConvertFrom-Json
     if ($state.SessionId -eq 0) { throw 'Service input agent incorrectly ran in session zero.' }
-    $protectedKey = Join-Path $env:ProgramData 'CrossMouse\key'
+    $protectedKey = Join-Path $env:ProgramData 'CrossMouse\credentials\key'
     $access = (Get-Acl $protectedKey).Access
     foreach ($entry in $access) {
         $sid = $entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value

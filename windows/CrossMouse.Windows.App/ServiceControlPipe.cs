@@ -20,9 +20,12 @@ internal static class ServiceControlPipe
     {
         if (!WindowsIdentity.GetCurrent().IsSystem) throw new UnauthorizedAccessException();
         _ = new SecurityIdentifier(ownerSid);
+        // Keep the first-instance handle for the complete agent lifetime. Re-
+        // creating it after each request races a client still closing its end
+        // and introduces a pipe-name takeover gap.
+        using var pipe = Create(ownerSid);
         while (!token.IsCancellationRequested)
         {
-            using var pipe = Create(ownerSid);
             await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(1));
@@ -36,6 +39,10 @@ internal static class ServiceControlPipe
                 }
             }
             catch (Exception error) when (error is IOException or OperationCanceledException) { }
+            finally
+            {
+                if (pipe.IsConnected) pipe.Disconnect();
+            }
         }
     }
     internal static async Task<bool> ReturnInputAsync()

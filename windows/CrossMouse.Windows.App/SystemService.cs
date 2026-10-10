@@ -18,6 +18,7 @@ internal sealed class SystemService : ServiceBase
     internal static string Executable => Path.Combine(InstallDirectory, "CrossMouse.exe");
     internal static string DataDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CrossMouse");
     internal static string ConfigurationPath => Path.Combine(DataDirectory, "service.json");
+    internal static string PairingKeyPath => Path.Combine(DataDirectory, "credentials", "key");
     private readonly CancellationTokenSource _stop = new();
     private Task? _broker;
 
@@ -32,7 +33,16 @@ internal sealed class SystemService : ServiceBase
     }
     internal static bool IsProtectedExecutable() => string.Equals(Path.GetFullPath(Environment.ProcessPath ?? ""),
         Executable, StringComparison.OrdinalIgnoreCase);
-    internal static bool Installed => File.Exists(ConfigurationPath) && File.Exists(Executable);
+    internal static bool Installed
+    {
+        get
+        {
+            if (!File.Exists(ConfigurationPath) || !File.Exists(Executable)) return false;
+            try { using var service = new ServiceController(NameOnSystem); _ = service.Status; return true; }
+            catch (InvalidOperationException) { return false; }
+            catch (System.ComponentModel.Win32Exception) { return false; }
+        }
+    }
     internal static bool Running
     {
         get
@@ -76,7 +86,10 @@ internal sealed class SystemService : ServiceBase
                 {
                     uint session = ConsoleSessionProcess.ActiveSession;
                     if (worker is not null && (worker.SessionId != session || worker.HasExited))
-                    { worker.Dispose(); worker = null; }
+                    {
+                        if (worker.HasExited) RecordServiceFailure("agent-exit", "exit-code:" + worker.ExitCode);
+                        worker.Dispose(); worker = null;
+                    }
                     if (worker is null && session != uint.MaxValue && session != 0)
                     {
                         try { worker = ConsoleSessionProcess.Start(Executable, session); }
@@ -111,10 +124,20 @@ internal sealed class SystemService : ServiceBase
 
     internal static async Task<int> RunSessionAgentAsync()
     {
+        try { return await RunSessionAgentCoreAsync().ConfigureAwait(false); }
+        catch (Exception error)
+        {
+            RecordServiceFailure("agent-fault", error.GetType().Name + ":" + error.HResult);
+            return 10;
+        }
+    }
+
+    private static async Task<int> RunSessionAgentCoreAsync()
+    {
         if (!WindowsIdentity.GetCurrent().IsSystem || !IsProtectedExecutable() ||
             Process.GetCurrentProcess().SessionId != ConsoleSessionProcess.ActiveSession) return 5;
         var config = ReadConfiguration();
-        byte[] key = Convert.FromHexString(File.ReadAllText(Path.Combine(DataDirectory, "key")).Trim());
+        byte[] key = Convert.FromHexString(File.ReadAllText(PairingKeyPath).Trim());
         if (key.Length != 32) return 6;
         using var stop = new CancellationTokenSource();
         await using var receiver = new ReceiverService(key, config.Port, rejectLocalPeers: !config.AllowLocalTestPeer);
@@ -128,6 +151,11 @@ internal sealed class SystemService : ServiceBase
             {
                 WriteStatus((ReceiverState)Volatile.Read(ref state), receiver);
                 if (control.IsFaulted) await control.ConfigureAwait(false);
+                if (!receiver.IsRunning)
+                {
+                    RecordServiceFailure("receiver-restart", "listener-stopped");
+                    receiver.Start();
+                }
                 await Task.Delay(500, stop.Token).ConfigureAwait(false);
             }
         }

@@ -69,21 +69,28 @@ internal sealed record CursorRaster(int Width, int Height, int HotX, int HotY,
             result[target + 2] = invert ? (byte)0 : (byte)Math.Min(alpha, black[source + 2]);
             result[target + 3] = (byte)alpha;
         }
-        // One opaque contrast rim around inversion-only glyphs makes I-beams
-        // and crosshairs readable on both white Chrome pages and dark dialogs.
-        if (inverted != 0)
+        // A hardware cursor may depend on background inversion/theme handling.
+        // Even a valid all-white I-beam disappears when copied onto a white
+        // Chrome page. Give every software glyph a contrasting one-pixel rim,
+        // selected from the local edge color, without reading the desktop.
         {
             byte[] original = (byte[])result.Clone();
             for (int y = 1; y < outHeight - 1; y++)
             for (int x = 1; x < outWidth - 1; x++)
             {
                 int pixel = (y * outWidth + x) * 4;
-                if (original[pixel + 3] == 0) continue;
+                int alpha = original[pixel + 3];
+                if (alpha < 64) continue;
+                int brightness = (original[pixel] + original[pixel + 1] + original[pixel + 2]) * 255 / (3 * alpha);
+                byte contrast = brightness >= 128 ? (byte)0 : (byte)255;
                 foreach (int offset in new[] { -outWidth, outWidth, -1, 1 })
                 {
                     int neighbor = pixel + offset * 4;
                     if (original[neighbor + 3] == 0)
-                        result[neighbor] = result[neighbor + 1] = result[neighbor + 2] = result[neighbor + 3] = 255;
+                    {
+                        result[neighbor] = result[neighbor + 1] = result[neighbor + 2] = contrast;
+                        result[neighbor + 3] = 255;
+                    }
                 }
             }
         }

@@ -73,7 +73,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     // This describes the Philips video input, NOT where the cursor is.
     private var windowsReady: Bool {
         get { automaticHandoff.displayInput == .windowsHDMI }
-        set { automaticHandoff.selectDisplay(newValue ? .windowsHDMI : .macDVI) }
+        set { rememberDisplayInput(newValue ? .windowsHDMI : .macDVI) }
     }
     private var remoteActive = false
     private var pressedModifiers = Set<Int>()
@@ -216,8 +216,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             guard let self, self.automaticHandoff.displayInput == .unknown,
                   !self.automaticHandoff.inProgress, !self.ddcBusy else { return }
             if let input {
-                self.automaticHandoff.selectDisplay(input == .hdmi ? .windowsHDMI : .macDVI)
+                self.rememberDisplayInput(input == .hdmi ? .windowsHDMI : .macDVI)
                 self.monitorStatus = "모니터 입력 읽기: \(input == .hdmi ? "HDMI" : "DVI")"
+            } else if let saved = UserDefaults.standard.string(forKey: "CrossMouse.lastSelectedInput"),
+                      saved == "HDMI" || saved == "DVI" {
+                self.automaticHandoff.selectDisplay(saved == "HDMI" ? .windowsHDMI : .macDVI)
+                self.monitorStatus = "마지막 선택한 \(saved) 모드로 복원 · 현재 모니터 입력 읽기는 지원되지 않습니다."
             } else {
                 self.monitorStatus = "현재 영상 입력 확인 불가 · F8로 Mac(DVI) 복귀 가능. 화면 모드를 선택해 주세요."
             }
@@ -611,7 +615,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 self.ddcBusy = false
                 // DDC work is serialized. Its physical result remains true if
                 // the user cancelled input ownership while the write ran.
-                if case .success = result { self.automaticHandoff.selectDisplay(.windowsHDMI) }
+                if case .success = result { self.rememberDisplayInput(.windowsHDMI) }
                 guard self.automaticHandoff.id == id else { return }
                 switch result {
                 case .success:
@@ -683,7 +687,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         monitorDDC.send(.dvi) { [weak self] result in
             guard let self else { return }
             self.ddcBusy = false
-            if case .success = result { self.automaticHandoff.selectDisplay(.macDVI) }
+            if case .success = result { self.rememberDisplayInput(.macDVI) }
             guard self.automaticHandoff.id == id else { self.updateMenu(); return }
             switch result {
             case .success:
@@ -696,6 +700,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             }
             self.hotCornerGate.reset()
             self.updateMenu()
+        }
+    }
+
+    private func rememberDisplayInput(_ input: AutomaticHandoff.DisplayInput) {
+        automaticHandoff.selectDisplay(input)
+        if input != .unknown {
+            UserDefaults.standard.set(input == .windowsHDMI ? "HDMI" : "DVI", forKey: "CrossMouse.lastSelectedInput")
         }
     }
 

@@ -393,7 +393,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                         // Resolve can outlive cancellation. Recheck ownership
                         // BEFORE any OS side effect, not just before replying.
                         if (!Native.WakePointerAt(target.Bounds.Left + target.Bounds.Width / 2,
-                            target.Bounds.Top + target.Bounds.Height / 2)) throw new IOException("pointer-wake-failed");
+                            target.Bounds.Top + target.Bounds.Height / 2)) throw new IOException("pointer-wake-failed:" + Native.LastInputError);
                         _target = target;
                     }
                     await channel.SendAsync(new MouseMessage { Type = "prepared", TransferId = id,

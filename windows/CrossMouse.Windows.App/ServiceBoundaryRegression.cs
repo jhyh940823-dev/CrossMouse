@@ -12,10 +12,16 @@ namespace CrossMouse.Windows.App;
 /// </summary>
 internal static class ServiceBoundaryRegression
 {
+    private static nint _restoreDesktop;
     internal static int Run()
     {
         if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true") return 5;
-        using var watchdog = new System.Threading.Timer(_ => Environment.Exit(1), null,
+        using var watchdog = new System.Threading.Timer(_ =>
+        {
+            nint original = Volatile.Read(ref _restoreDesktop);
+            if (original != 0) SwitchDesktop(original);
+            Environment.Exit(1);
+        }, null,
             TimeSpan.FromSeconds(45), Timeout.InfiniteTimeSpan);
         try { RunAsync().GetAwaiter().GetResult(); return 0; }
         catch (Exception error) { Console.Error.WriteLine($"FAIL SYSTEM desktop integration: {error}"); return 1; }
@@ -27,7 +33,7 @@ internal static class ServiceBoundaryRegression
         Require(config.AllowLocalTestPeer, "The production service must reject local-network self-connections.");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(35));
         var token = timeout.Token;
-        byte[] key = Convert.FromHexString(File.ReadAllText(Path.Combine(SystemService.DataDirectory, "key")).Trim());
+        byte[] key = Convert.FromHexString(File.ReadAllText(SystemService.PairingKeyPath).Trim());
         using var peer = await RemoteInputRegression.Peer.ConnectAsync(key, config.Port, token);
         await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
         var pong = await peer.ReadAsync(token);
@@ -39,9 +45,14 @@ internal static class ServiceBoundaryRegression
 
         nint original = OpenInputDesktop(0, false, 0x181);
         Require(original != 0, "No original desktop for guaranteed restoration.");
+        Volatile.Write(ref _restoreDesktop, original);
         string name = "CrossMouse-CI-" + Guid.NewGuid().ToString("N");
         nint desktop = CreateDesktopW(name, 0, 0, 0, 0x10000000, 0);
-        Require(desktop != 0, "Could not create isolated desktop.");
+        if (desktop == 0)
+        {
+            Volatile.Write(ref _restoreDesktop, 0); CloseDesktop(original);
+            throw new Exception("Could not create isolated desktop.");
+        }
         var shown = new TaskCompletionSource<TestWindow>(TaskCreationOptions.RunContinuationsAsynchronously);
         var clicked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var typed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -75,7 +86,8 @@ internal static class ServiceBoundaryRegression
             await Task.Delay(350, token);
             transfer = Guid.NewGuid().ToString();
             await peer.SendAsync(new MouseMessage { Type = "prepare", TransferId = transfer }, token);
-            await peer.ExpectAsync("prepared", token);
+            var prepared = await peer.ReadAsync(token);
+            Require(prepared.Type == "prepared", $"Preparation failed on alternate input desktop: {prepared.Type}/{prepared.Reason}");
             await peer.SendAsync(new MouseMessage { Type = "enter", TransferId = transfer, CenterCursor = true }, token);
             var entered = await peer.ReadAsync(token);
             Require(entered.Type == "entered" && entered.PointerVisible == true && entered.TransferId == transfer,
@@ -102,6 +114,7 @@ internal static class ServiceBoundaryRegression
             SwitchDesktop(original);
             target?.Window.BeginInvoke(new Action(() => target.Window.Close()));
             try { await ended.Task.WaitAsync(TimeSpan.FromSeconds(3)); } catch (TimeoutException) { }
+            Volatile.Write(ref _restoreDesktop, 0);
             CloseDesktop(original); CloseDesktop(desktop);
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
         }
