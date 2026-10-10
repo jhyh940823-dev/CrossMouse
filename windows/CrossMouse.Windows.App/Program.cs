@@ -30,6 +30,8 @@ internal static class Program
             }
         }
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--automatic-entry-test"))
+            return AutomaticEntryRegression.Run();
         if (args.Contains("--startup-self-test"))
             return StartupRegression.Run();
         if (args.Contains("--receiver-ui-independence-test"))
