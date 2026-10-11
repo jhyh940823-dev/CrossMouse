@@ -86,7 +86,9 @@ jobs:
       - name: Protected service and interactive desktop integration
         if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
         timeout-minutes: 5
-        run: ./scripts/Test-WindowsService.ps1
+        # Exercise the same inbox Windows PowerShell used by the user's .cmd
+        # launcher, not just the newer pwsh installed on GitHub runners.
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/Test-WindowsService.ps1
       - name: Publish Windows standalone receiver
         run: dotnet publish windows/CrossMouse.Windows -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist/windows
       - uses: actions/upload-artifact@v4

@@ -253,7 +253,11 @@ try {
     Copy-Item -LiteralPath $sourceExe -Destination $newExe
     Protect-ReadOnlyFile $newExe
     if ((Get-FileHash -LiteralPath $newExe -Algorithm SHA256).Hash -ine $ExpectedHash) { throw 'Staged binary changed during copy.' }
-    if (Test-Path -LiteralPath $exe) { [IO.File]::Replace($newExe, $exe, $null) }
+    if (Test-Path -LiteralPath $exe) {
+        # PowerShell can marshal $null to an empty string for this overload.
+        # Use a real protected backup path for the atomic replacement instead.
+        [IO.File]::Replace($newExe, $exe, (Join-Path $backup 'CrossMouse.replaced.exe'))
+    }
     else { [IO.File]::Move($newExe, $exe) }
     Protect-ReadOnlyFile $exe
     if (Test-Path -LiteralPath $keyPath) {

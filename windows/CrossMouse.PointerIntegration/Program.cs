@@ -62,8 +62,19 @@ internal static class Program
         try
         {
             var portFile = Path.Combine(directory, "profile", "DevToolsActivePort");
-            while (!File.Exists(portFile)) await Task.Delay(100, token);
-            int port = int.Parse(File.ReadLines(portFile).First());
+            int port = 0;
+            while (port == 0)
+            {
+                // File creation precedes Chrome closing/publishing its port.
+                // Wait for readable valid content, not merely File.Exists.
+                try
+                {
+                    if (File.Exists(portFile) && int.TryParse(File.ReadLines(portFile).FirstOrDefault(), out int candidate)
+                        && candidate is > 0 and <= 65535) port = candidate;
+                }
+                catch (IOException) { /* owned Chrome is still writing */ }
+                if (port == 0) await Task.Delay(25, token);
+            }
             using var http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
             string? endpoint = null;
             while (endpoint is null)
