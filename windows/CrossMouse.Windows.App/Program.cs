@@ -38,6 +38,7 @@ internal static class Program
             }
         }
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--pointer-occlusion-test")) return PointerOcclusionRegression.Run();
         if (args.Contains("--peer-lease-test")) return PeerLeaseRegression.Run();
         if (args.Contains("--reliability-test")) return ReliabilityRegression.Run();
         if (args.Contains("--service-boundary-test")) return ServiceBoundaryRegression.Run();

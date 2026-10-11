@@ -72,6 +72,10 @@ jobs:
         if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
         timeout-minutes: 2
         run: dotnet run -c Release --project windows/CrossMouse.PointerIntegration
+      - name: Continuously presented cursor above later topmost popups
+        if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
+        timeout-minutes: 2
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --pointer-occlusion-test
       - name: Silent authenticated peer and incomplete frame must release input
         if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
         timeout-minutes: 2
