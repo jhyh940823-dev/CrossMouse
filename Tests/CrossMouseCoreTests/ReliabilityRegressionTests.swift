@@ -3,6 +3,19 @@ import XCTest
 @testable import CrossMouseCore
 
 final class ReliabilityRegressionTests: XCTestCase {
+    func testCachedDVISelectionCannotDisableF8WhenActualInputIsUnreadable() {
+        var state = AutomaticHandoff(displayInput: .unknown)
+        state.restoreDisplaySelection(.macDVI)
+        XCTAssertEqual(state.displayInput, .macDVI) // normal Mac routing retained
+        XCTAssertFalse(state.hasCurrentDisplaySelection)
+        XCTAssertTrue(state.needsDisplayReturnShortcut)
+        var shortcut = DisplayReturnShortcut()
+        XCTAssertEqual(shortcut.handle(keyCode: 100, down: true, enabled: state.needsDisplayReturnShortcut), .requestDVI)
+        state.selectDisplay(.macDVI) // DVI selected during this run
+        XCTAssertFalse(state.needsDisplayReturnShortcut)
+        XCTAssertEqual(shortcut.handle(keyCode: 100, down: false, enabled: false), .consume)
+        XCTAssertEqual(shortcut.handle(keyCode: 100, down: true, enabled: false), .pass)
+    }
     func testReceiverDiagnosticsDecodeWithoutChangingLegacyPackets() throws {
         let current = Data(#"{"type":"pong","version":"0.5.0","capability":"handoff-2","serviceMode":true,"inputDesktop":"Winlogon","pointerState":"surface:Winlogon"}"#.utf8)
         let decoded = try JSONDecoder().decode(CrossMouseMessage.self, from: current)

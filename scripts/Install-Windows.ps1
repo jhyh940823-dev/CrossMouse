@@ -272,8 +272,10 @@ try {
         New-Service -Name $serviceName -BinaryPathName ('"' + $exe + '" --service') -StartupType Automatic `
             -DisplayName 'CrossMouse paired input (login and secure desktop)' | Out-Null
     } else {
-        & sc.exe config $serviceName binPath= ('"' + $exe + '" --service') start= auto | Out-Host
-        Check-NativeResult 'Service configuration'
+        # The protected executable path and SYSTEM identity were validated
+        # before mutation and do not change on upgrade. Do not re-parse that
+        # quoted command through sc.exe/PowerShell's native argument rules.
+        Set-Service -Name $serviceName -StartupType Automatic
     }
     # Single-file native extraction is protected too; no SYSTEM DLLs in a user's Temp.
     New-ItemProperty -Path $serviceRegistry -Name Environment -PropertyType MultiString -Force `

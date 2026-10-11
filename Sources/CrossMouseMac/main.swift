@@ -230,8 +230,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 self.monitorStatus = "모니터 입력 읽기: \(input == .hdmi ? "HDMI" : "DVI")"
             } else if let saved = UserDefaults.standard.string(forKey: "CrossMouse.lastSelectedInput"),
                       saved == "HDMI" || saved == "DVI" {
-                self.automaticHandoff.selectDisplay(saved == "HDMI" ? .windowsHDMI : .macDVI)
-                self.monitorStatus = "마지막 선택한 \(saved) 모드로 복원 · 현재 모니터 입력 읽기는 지원되지 않습니다."
+                self.automaticHandoff.restoreDisplaySelection(saved == "HDMI" ? .windowsHDMI : .macDVI)
+                self.monitorStatus = "마지막 선택 \(saved) · 실제 입력 읽기 불가. F8로 Mac 복귀는 계속 사용할 수 있습니다."
             } else {
                 self.monitorStatus = "현재 영상 입력 확인 불가 · F8로 Mac(DVI) 복귀 가능. 화면 모드를 선택해 주세요."
             }
@@ -811,7 +811,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             receiverResponsive: receiverResponsive,
             autoVerified: verifiedHDMI && verifiedDVI, autoEnabled: autoInputSwitch,
             monitorBusy: ddcBusy, monitorStatus: monitorStatus,
-            displayKnown: automaticHandoff.displayInput != .unknown
+            displayKnown: automaticHandoff.hasCurrentDisplaySelection
         )
         controlWindow?.renderPointerSpeed(pointerMotion.percent)
     }
@@ -906,7 +906,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         if let shortcutEvent = DisplayReturnEvent(type: type, event: event) {
             let decision = shortcutEvent.apply(
                 to: &displayReturnShortcut,
-                enabled: verifiedDVI && (automaticHandoff.displayInput != .macDVI || automaticHandoff.inProgress || requestedMacDisplay)
+                enabled: verifiedDVI && (automaticHandoff.needsDisplayReturnShortcut || requestedMacDisplay)
             )
             switch decision {
             case .requestDVI:

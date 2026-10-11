@@ -15,10 +15,14 @@ public struct AutomaticHandoff: Sendable {
     }
     public private(set) var phase: Phase = .local
     public private(set) var displayInput: DisplayInput = .macDVI
+    public private(set) var hasCurrentDisplaySelection = true
     public private(set) var changedAt: TimeInterval = 0
     public private(set) var switchesDisplayOnEntry = true
     public private(set) var entryFractionY: Double = 0.5
-    public init(displayInput: DisplayInput = .macDVI) { self.displayInput = displayInput }
+    public init(displayInput: DisplayInput = .macDVI) {
+        self.displayInput = displayInput
+        hasCurrentDisplaySelection = displayInput != .unknown
+    }
     public var id: String? {
         switch phase {
         case .local: nil
@@ -32,7 +36,19 @@ public struct AutomaticHandoff: Sendable {
 
     /// Records a user-confirmed input or the completion of our serialized DDC
     /// write. It does not grant input ownership, even if an old write completed.
-    public mutating func selectDisplay(_ input: DisplayInput) { displayInput = input }
+    public mutating func selectDisplay(_ input: DisplayInput) {
+        displayInput = input
+        hasCurrentDisplaySelection = input != .unknown
+    }
+    /// A last-run preference is useful for routing, not evidence that the
+    /// panel stayed on DVI while this app was stopped. It cannot disable F8.
+    public mutating func restoreDisplaySelection(_ input: DisplayInput) {
+        displayInput = input
+        hasCurrentDisplaySelection = false
+    }
+    public var needsDisplayReturnShortcut: Bool {
+        !hasCurrentDisplaySelection || displayInput != .macDVI || inProgress
+    }
 
     @discardableResult
     public mutating func begin(id: String = UUID().uuidString, switchDisplay: Bool = true,
@@ -51,7 +67,7 @@ public struct AutomaticHandoff: Sendable {
     }
     public mutating func switched(_ replyID: String?, now: TimeInterval) -> Bool {
         guard case .switchingToWindows(let id) = phase, replyID == id else { return false }
-        displayInput = .windowsHDMI
+        selectDisplay(.windowsHDMI)
         phase = .acquiring(id); changedAt = now; return true
     }
     public mutating func acquired(_ replyID: String?, visible: Bool, now: TimeInterval) -> Bool {
@@ -71,7 +87,7 @@ public struct AutomaticHandoff: Sendable {
     }
     public mutating func returned(_ replyID: String?) -> Bool {
         guard case .switchingToMac(let id) = phase, replyID == id else { return false }
-        displayInput = .macDVI; phase = .local; return true
+        selectDisplay(.macDVI); phase = .local; return true
     }
     @discardableResult
     public mutating func cancel() -> String? { let old = id; phase = .local; return old }
