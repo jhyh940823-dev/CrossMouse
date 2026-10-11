@@ -38,6 +38,7 @@ internal static class ServiceBoundaryRegression
         await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
         var pong = await peer.ReadAsync(token);
         Require(pong.Type == "pong" && pong.ServiceMode == true, "Paired receiver is not the SYSTEM session agent.");
+        string originalName = pong.InputDesktop ?? throw new Exception("Original input desktop is unknown.");
         var status = SystemService.ReadStatus();
         Require(status is not null && status.SessionId == ConsoleSessionProcess.ActiveSession && status.SessionId != 0,
             "Agent did not run in the interactive console session.");
@@ -82,8 +83,9 @@ internal static class ServiceBoundaryRegression
         try
         {
             target = await shown.Task.WaitAsync(token);
-            Require(SwitchDesktop(desktop), "Could not activate the isolated test desktop.");
-            await Task.Delay(350, token);
+            // Acquire on Default, THEN change the active desktop without
+            // sending a leave/new enter. This is the actual lifecycle boundary
+            // that UAC/lock transitions require, not just fresh entry elsewhere.
             transfer = Guid.NewGuid().ToString();
             await peer.SendAsync(new MouseMessage { Type = "prepare", TransferId = transfer }, token);
             var prepared = await peer.ReadAsync(token);
@@ -92,16 +94,20 @@ internal static class ServiceBoundaryRegression
             var entered = await peer.ReadAsync(token);
             Require(entered.Type == "entered" && entered.PointerVisible == true && entered.TransferId == transfer,
                 $"Service could not acquire the isolated input desktop: {entered.Type}/{entered.Reason}");
-            await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
-            pong = await peer.ReadAsync(token);
-            Require(pong.InputDesktop == name, "Service still reported a stale Default desktop.");
+            await AwaitPresentedDesktop(peer, originalName, token);
+            Require(SwitchDesktop(desktop), "Could not activate the isolated test desktop.");
+            await AwaitPresentedDesktop(peer, name, token);
             await MoveClick(peer, transfer, target.Text, token);
             await peer.SendAsync(new MouseMessage { Type = "key", TransferId = transfer, Code = 0, Down = true }, token);
             await peer.SendAsync(new MouseMessage { Type = "key", TransferId = transfer, Code = 0, Down = false }, token);
             await typed.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
             await MoveClick(peer, transfer, target.Button, token);
             await clicked.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
-            Console.WriteLine("PASS authenticated pointer, click, and key input on a different interactive desktop");
+            Require(SwitchDesktop(original), "Could not restore Default during the live focus lease.");
+            await AwaitPresentedDesktop(peer, originalName, token);
+            Require(SwitchDesktop(desktop), "Could not re-enter the isolated desktop during the live focus lease.");
+            await AwaitPresentedDesktop(peer, name, token);
+            Console.WriteLine("PASS active focus survives Default -> isolated -> Default -> isolated with a painted pointer on each desktop; click and key delivered");
             await peer.SendAsync(new MouseMessage { Type = "leave", TransferId = transfer }, token);
             transfer = null;
         }
@@ -122,6 +128,19 @@ internal static class ServiceBoundaryRegression
         pong = await peer.ReadAsync(token);
         Require(pong.Type == "pong" && pong.InputDesktop != name, "Service did not follow restoration to the original desktop.");
         Console.WriteLine("PASS original desktop restored; same authenticated service connection stays alive");
+    }
+    private static async Task AwaitPresentedDesktop(RemoteInputRegression.Peer peer, string name, CancellationToken token)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(token);
+        bound.CancelAfter(TimeSpan.FromSeconds(3));
+        while (true)
+        {
+            await peer.SendAsync(new MouseMessage { Type = "ping" }, bound.Token);
+            var state = await peer.ReadAsync(bound.Token);
+            Require(state.Type == "pong", $"Focus lost during desktop transition: {state.Type}/{state.Reason}");
+            if (state.InputDesktop == name && state.PointerState == "surface:" + name) return;
+            await Task.Delay(25, bound.Token);
+        }
     }
     private static async Task MoveClick(RemoteInputRegression.Peer peer, string id, Point target, CancellationToken token)
     {

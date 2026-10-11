@@ -79,12 +79,12 @@ internal static class HandoffRegression
 
             bool active = true;
             nint foreground = GetForegroundWindow();
-            using var presenter = new PointerPresenter(() => active, simulateHiddenNativePointerForTest: true);
+            using var presenter = new PointerPresenter(() => active);
             Require(await presenter.VerifyAsync(token), "no physical/native cursor fallback not presented");
             Require(GetForegroundWindow() == foreground, "pointer presentation stole focus");
             active = false;
             Require(!await presenter.VerifyAsync(token), "pointer surface remained after ownership ended");
-            Console.WriteLine("PASS simulated missing native cursor has click-through presentation; no activation; release hides it");
+            Console.WriteLine("PASS session-owned pointer presentation; no activation; release hides it");
         }
         finally { await receiver.StopAsync(); Native.SetCursorPos(original.X, original.Y); }
     }

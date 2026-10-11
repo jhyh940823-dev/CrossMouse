@@ -111,6 +111,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             ?? PointerMotionScale.defaultPercent)
     private var peerCapability: String?
     private var peerVersion = "확인되지 않음"
+    private var peerStatus = ""
     private let physicalPointer = MacPhysicalPointer()
     private var launchedInBackground = false
 
@@ -149,6 +150,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     self.connected = value
                     self.peerCapability = nil
+                    self.peerStatus = ""
                     self.receiverLiveness.reset()
                     self.receiverResponsive = false
                     if !value {
@@ -169,11 +171,19 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                         guard let self, self.connected, self.connectionWanted else { return }
                         self.peerCapability = message.capability
                         self.peerVersion = message.version ?? "이전 수신기"
+                        let peerStatus = "Windows \(self.peerVersion) · "
+                            + (message.serviceMode == true ? "로그인 전 서비스" : "로그인 후 앱")
+                            + (message.inputDesktop.map { " · " + String($0.prefix(64)) } ?? "")
+                            + (message.pointerState.map { " · " + String($0.prefix(100)) } ?? "")
+                        let peerStatusChanged = self.peerStatus != peerStatus
+                        self.peerStatus = peerStatus
                         self.receiverLiveness.confirm(
                             at: ProcessInfo.processInfo.systemUptime
                         )
                         if !self.receiverResponsive {
                             self.receiverResponsive = true
+                            self.updateMenu()
+                        } else if peerStatusChanged {
                             self.updateMenu()
                         }
                     }
@@ -796,7 +806,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         statusItem.button?.title = remoteActive ? "⇆ W" : "⇆"
         controlWindow?.render(
             connected: connected, connecting: connectionWanted,
-            windowsMode: windowsReady, captureStatus: captureLine.title + (lastShortcutStatus.isEmpty ? "" : " · " + lastShortcutStatus),
+            windowsMode: windowsReady, captureStatus: captureLine.title + (lastShortcutStatus.isEmpty ? "" : " · " + lastShortcutStatus)
+                + (peerStatus.isEmpty ? "" : "\n" + peerStatus),
             receiverResponsive: receiverResponsive,
             autoVerified: verifiedHDMI && verifiedDVI, autoEnabled: autoInputSwitch,
             monitorBusy: ddcBusy, monitorStatus: monitorStatus,

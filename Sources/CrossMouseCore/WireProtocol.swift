@@ -34,6 +34,9 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
     public var version: String?
     public var pointerVisible: Bool?
     public var motionTimeUs: Int64?
+    public var inputDesktop: String?
+    public var serviceMode: Bool?
+    public var pointerState: String?
 
     public init(
         type: String,
@@ -51,7 +54,10 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
         capability: String? = nil,
         version: String? = nil,
         pointerVisible: Bool? = nil,
-        motionTimeUs: Int64? = nil
+        motionTimeUs: Int64? = nil,
+        inputDesktop: String? = nil,
+        serviceMode: Bool? = nil,
+        pointerState: String? = nil
     ) {
         self.type = type
         self.dx = dx
@@ -69,6 +75,9 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
         self.version = version
         self.pointerVisible = pointerVisible
         self.motionTimeUs = motionTimeUs
+        self.inputDesktop = inputDesktop
+        self.serviceMode = serviceMode
+        self.pointerState = pointerState
     }
 }
 

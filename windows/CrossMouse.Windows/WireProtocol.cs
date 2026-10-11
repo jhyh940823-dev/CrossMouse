@@ -28,6 +28,7 @@ internal sealed class MouseMessage
     public long? MotionTimeUs { get; set; }
     public string? InputDesktop { get; set; }
     public bool? ServiceMode { get; set; }
+    public string? PointerState { get; set; }
 }
 
 internal static class WireProtocol

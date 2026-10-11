@@ -48,7 +48,7 @@ internal sealed class ReceiverService : IAsyncDisposable
 
     public bool IsRunning => _listener is not null;
     public bool IsRemotelyActive => _injector.IsRemotelyActive;
-    public string? InputFailure => _injector.InputFailure;
+    public string? InputFailure => _injector.InputFailure ?? Volatile.Read(ref _presenter)?.Failure;
     public int ListeningPort =>
         (_listener?.LocalEndpoint as IPEndPoint)?.Port ?? 0;
 
@@ -185,7 +185,9 @@ internal sealed class ReceiverService : IAsyncDisposable
                                     new MouseMessage { Type = "pong", Capability = HandoffCapability,
                                         Version = typeof(ReceiverService).Assembly.GetName().Version?.ToString(3),
                                         InputDesktop = InputDesktopAccess.CurrentName(),
-                                        ServiceMode = System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem },
+                                        ServiceMode = System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem,
+                                        PointerState = InputFailure ?? (_injector.IsRemotelyActive
+                                            ? Volatile.Read(ref _presenter)?.State ?? "not-presented" : "idle") },
                                     sessionCancel.Token
                                 ).ConfigureAwait(false);
                                 continue;
@@ -307,8 +309,12 @@ internal sealed class ReceiverService : IAsyncDisposable
             string reason = "left-edge";
             lock (_handoff)
             {
+                // Acquisition owns its own readiness check and deadline. A
+                // previous surface's failure must not cancel the new owner
+                // between Apply(enter) and its successful VerifyAsync.
+                if (_preparedId is not null) continue;
                 if (!_injector.IsRemotelyActive) continue;
-                if (_injector.InputFailure is not null || InputDesktopAccess.CurrentName() is null)
+                if (InputFailure is not null || InputDesktopAccess.CurrentName() is null)
                 {
                     reason = "input-unavailable";
                     _injector.ReleaseAll();

@@ -4,36 +4,46 @@ using CrossMouse.Windows;
 
 namespace CrossMouse.Windows.App;
 
-/// Presentation belongs to the remote-input session, not to whether Windows
-/// has a physical mouse plugged in. Never changes ShowCursor counters or OS
-/// mouse settings. A click-through, non-activating pointer surface is used only
-/// when the native pointer is not shown. It runs independently of the settings UI.
+/// The remote session owns its pointer surface for the entire focus lease.
+/// CURSOR_SHOWING and MousePresent describe OS state, not proof that the paired
+/// PC's hardware cursor is visible. Never switch our only guaranteed drawing
+/// path off on those flags. Native shape/hotspot still come from Windows; no
+/// ShowCursor counters, cursor scheme or other process state is modified.
 internal sealed class PointerPresenter : IDisposable
 {
     private readonly object _sync = new();
     private readonly Func<bool> _active;
-    private readonly bool _simulateHidden;
     private readonly Action? _observedFrame;
     private PointerSurfaceThread? _thread;
     private string? _desktop;
     private bool _disposed;
-    internal PointerPresenter(Func<bool> active, bool simulateHiddenNativePointerForTest = false,
-        Action? observedFrameForTest = null)
-    { _active = active; _simulateHidden = simulateHiddenNativePointerForTest; _observedFrame = observedFrameForTest; }
-    private PointerSurfaceThread? Current()
+    internal PointerPresenter(Func<bool> active, Action? observedFrameForTest = null)
+    { _active = active; _observedFrame = observedFrameForTest; }
+    internal string? Failure { get { lock (_sync) return _thread?.Failure; } }
+    internal string State
+    {
+        get
+        {
+            lock (_sync)
+                return _thread?.Failure ?? (_thread?.IsPresented == true ? "surface:" + _desktop : "not-presented");
+        }
+    }
+    private PointerSurfaceThread? Current(bool retryFailed = false)
     {
         string? desktop = InputDesktopAccess.CurrentName();
         lock (_sync)
         {
             if (_disposed) return null;
-            if (desktop != _desktop)
+            if (desktop != _desktop || (retryFailed && _thread?.Failure is not null))
             { _thread?.Dispose(); _thread = null; _desktop = desktop; }
             if (desktop is null) return null;
-            return _thread ??= new PointerSurfaceThread(_active, _simulateHidden, _observedFrame, desktop);
+            return _thread ??= new PointerSurfaceThread(_active, _observedFrame, desktop);
         }
     }
     internal bool RequestRefresh() => Current()?.RequestRefresh() ?? false;
-    internal Task<bool> VerifyAsync(CancellationToken token) => Current()?.VerifyAsync(token) ?? Task.FromResult(false);
+    // A new acquisition may retry a failed surface; render ticks never create
+    // unbounded replacement threads on a persistently inaccessible desktop.
+    internal Task<bool> VerifyAsync(CancellationToken token) => Current(retryFailed: true)?.VerifyAsync(token) ?? Task.FromResult(false);
     public void Dispose()
     { lock (_sync) { _disposed = true; _thread?.Dispose(); _thread = null; } }
 }
@@ -46,7 +56,11 @@ internal sealed class PointerSurfaceThread : IDisposable
     private readonly Func<bool> _active;
     private int _disposed;
     private int _refreshQueued;
-    internal PointerSurfaceThread(Func<bool> active, bool simulateHiddenNativePointerForTest,
+    private string? _failure;
+    private int _presented;
+    internal string? Failure => Volatile.Read(ref _failure);
+    internal bool IsPresented => Volatile.Read(ref _presented) != 0 && Volatile.Read(ref _disposed) == 0;
+    internal PointerSurfaceThread(Func<bool> active,
         Action? observedFrameForTest, string expectedDesktop)
     {
         _active = active;
@@ -56,12 +70,16 @@ internal sealed class PointerSurfaceThread : IDisposable
             {
                 using var desktop = InputDesktopAccess.Enter(createsWindow: true);
                 if (desktop.Name != expectedDesktop) throw new IOException("pointer-desktop-changed-before-create");
-                using var surface = new Surface(_active, simulateHiddenNativePointerForTest, observedFrameForTest);
+                using var surface = new Surface(_active, observedFrameForTest);
                 _ = surface.Handle;
                 _surface.TrySetResult(surface);
                 Application.Run(new ApplicationContext());
             }
-            catch (Exception error) { _surface.TrySetException(error); }
+            catch (Exception error)
+            {
+                Volatile.Write(ref _failure, "pointer-thread:" + error.GetType().Name);
+                _surface.TrySetException(error);
+            }
         }) { IsBackground = true, Name = "CrossMouse.PointerPresentation" };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
@@ -84,7 +102,7 @@ internal sealed class PointerSurfaceThread : IDisposable
                 try
                 {
                     if (Volatile.Read(ref _disposed) == 0 && !surface.IsDisposed)
-                        surface.RefreshPointer();
+                        Refresh(surface);
                 }
                 finally { Volatile.Write(ref _refreshQueued, 0); }
             }));
@@ -102,10 +120,29 @@ internal sealed class PointerSurfaceThread : IDisposable
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         surface.BeginInvoke(new Action(() =>
         {
-            try { done.TrySetResult(surface.RefreshPointer()); }
+            try { done.TrySetResult(Refresh(surface)); }
             catch (Exception error) { done.TrySetException(error); }
         }));
         return await done.Task.WaitAsync(token).ConfigureAwait(false);
+    }
+    private bool Refresh(Surface surface)
+    {
+        try
+        {
+            bool visible = surface.RefreshPointer();
+            Volatile.Write(ref _presented, visible ? 1 : 0);
+            Volatile.Write(ref _failure, _active() && !visible ? "pointer-presentation-failed" : null);
+            return visible;
+        }
+        catch (Exception error) when (error is ArgumentException or ExternalException or InvalidOperationException)
+        {
+            // A bad/replaced native cursor resource must not kill this message
+            // loop and leave the receiver saying it owns an invisible pointer.
+            Volatile.Write(ref _failure, "pointer-presentation:" + error.GetType().Name);
+            Volatile.Write(ref _presented, 0);
+            surface.Hide();
+            return false;
+        }
     }
     public void Dispose()
     {
@@ -128,12 +165,10 @@ internal sealed class PointerSurfaceThread : IDisposable
         private readonly Func<bool> _active;
         private LayeredCursorImage? _image;
         private nint _cursorHandle;
-        private readonly bool _simulateHidden;
         private readonly Action? _observedFrameForTest;
-        internal Surface(Func<bool> active, bool simulateHidden, Action? observedFrameForTest)
+        internal Surface(Func<bool> active, Action? observedFrameForTest)
         {
             _active = active;
-            _simulateHidden = simulateHidden;
             _observedFrameForTest = observedFrameForTest;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false; TopMost = true;
@@ -157,13 +192,9 @@ internal sealed class PointerSurfaceThread : IDisposable
                 _image?.Dispose();
                 _image = new LayeredCursorImage(CursorRaster.Capture(info.Cursor));
             }
-            // CURSOR_SHOWING is only an OS flag. A null/transparent resource
-            // must not make us hide the only visible remote pointing surface.
-            if (!_simulateHidden && SystemInformation.MousePresent && (info.Flags & 1) != 0 && !_image!.Raster.UsedFallback)
-            {
-                if (Visible) Hide();
-                return true;
-            }
+            // Do not yield visual ownership to a native visibility flag when
+            // crossing an app/control. A null or transparent glyph is rendered
+            // as an owned fallback, using the exact OS position/hotspot.
             Bounds = new Rectangle(info.Position.X - _image!.Raster.HotX, info.Position.Y - _image.Raster.HotY,
                 _image.Raster.Width, _image.Raster.Height);
             if (!Visible) Show();

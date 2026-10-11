@@ -69,7 +69,7 @@ internal static class PointerCadenceRegression
         var times = new ConcurrentQueue<long>();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var presenter = new PointerPresenter(() => Volatile.Read(ref active) == 1,
-            simulateHiddenNativePointerForTest: true, observedFrameForTest: () =>
+            observedFrameForTest: () =>
             {
                 times.Enqueue(Stopwatch.GetTimestamp());
                 if (Interlocked.Exchange(ref blockNextFrame, 0) == 1)
