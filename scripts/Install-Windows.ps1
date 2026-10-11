@@ -4,6 +4,7 @@ param(
     [switch]$UninstallService,
     [switch]$BuildOnly,
     [switch]$CiTest,
+    [switch]$CiFailAfterReady,
     [switch]$ElevatedStage,
     [string]$StagingPath,
     [string]$PairingKeyPath,
@@ -116,6 +117,7 @@ function Open-InstalledControls {
 
 if ($Port -lt 1024 -or $Port -gt 65535) { throw 'Invalid TCP port.' }
 if ($CiTest -and $env:GITHUB_ACTIONS -ne 'true') { throw '-CiTest is reserved for the isolated CI runner.' }
+if ($CiFailAfterReady -and (!$CiTest -or $env:GITHUB_ACTIONS -ne 'true')) { throw 'Failure injection is CI-only.' }
 if ($UninstallService) {
     if (!$isAdmin) { throw 'Run this uninstall command as administrator.' }
     $service = Get-Service $serviceName -ErrorAction SilentlyContinue
@@ -145,12 +147,16 @@ if (!$ElevatedStage) {
     $OwnerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $PairingKeyPath = Join-Path $env:LOCALAPPDATA 'CrossMouse\key'
     if ($CiTest) {
-        $PairingKeyPath = Join-Path $StagingPath 'ci-pairing.txt'
-        $key = New-Object byte[] 32
-        $random = [Security.Cryptography.RandomNumberGenerator]::Create()
-        try { $random.GetBytes($key) } finally { $random.Dispose() }
-        [IO.File]::WriteAllText($PairingKeyPath, ([BitConverter]::ToString($key) -replace '-', ''))
-        [Array]::Clear($key, 0, $key.Length)
+        $existingTestKey = Join-Path $credentials 'key'
+        if (Test-Path -LiteralPath $existingTestKey) { $PairingKeyPath = $existingTestKey }
+        else {
+            $PairingKeyPath = Join-Path $StagingPath 'ci-pairing.txt'
+            $key = New-Object byte[] 32
+            $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $random.GetBytes($key) } finally { $random.Dispose() }
+            [IO.File]::WriteAllText($PairingKeyPath, ([BitConverter]::ToString($key) -replace '-', ''))
+            [Array]::Clear($key, 0, $key.Length)
+        }
     }
     if (!(Test-Path -LiteralPath $PairingKeyPath)) { throw 'Existing pairing key was not found; no key was reset or invented.' }
     if (!$isAdmin) {
@@ -183,6 +189,36 @@ if ($version.ProductName -ne 'CrossMouse' -or $version.FileMajorPart -ne 0 -or $
 $pairing = [IO.File]::ReadAllText($PairingKeyPath).Trim()
 if ($pairing -notmatch '^[0-9a-fA-F]{64}$') { throw 'Pairing key must be exactly 32 bytes.' }
 
+$oldServiceInfo = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+if ($oldServiceInfo -and ($oldServiceInfo.PathName -ine ('"' + $exe + '" --service') -or
+    $oldServiceInfo.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM'))) {
+    throw 'A different service owns the CrossMouseInput name. Refusing to stop or replace it.'
+}
+$serviceRegistry = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+$oldEnvironment = $null; $oldRecovery = $null
+if ($oldServiceInfo) {
+    $oldEnvironment = (Get-ItemProperty -LiteralPath $serviceRegistry -Name Environment -ErrorAction SilentlyContinue).Environment
+    $oldRecovery = (Get-ItemProperty -LiteralPath $serviceRegistry -Name FailureActions -ErrorAction SilentlyContinue).FailureActions
+}
+$oldFirewall = $null
+if (!$CiTest) {
+    $oldFirewall = Get-NetFirewallRule -Name 'CrossMouse-Input-LAN' -ErrorAction SilentlyContinue
+    if ($oldFirewall) {
+        $application = $oldFirewall | Get-NetFirewallApplicationFilter
+        $ports = $oldFirewall | Get-NetFirewallPortFilter
+        $addresses = $oldFirewall | Get-NetFirewallAddressFilter
+        if (!$oldServiceInfo -or @($oldFirewall).Count -ne 1 -or
+            $application.Program -ine $exe -or $ports.Protocol -notin @('TCP', '6') -or
+            [string]$ports.LocalPort -ne [string]$Port -or [string]$addresses.RemoteAddress -ne 'LocalSubnet' -or
+            $oldFirewall.Action -ne 'Allow' -or $oldFirewall.Direction -ne 'Inbound') {
+            throw 'A different firewall rule owns the CrossMouse name. No rule was changed.'
+        }
+    }
+}
+$firewallCreated = $false
+$runChanged = $false; $oldRunCommand = $null
+$runPath = "$OwnerSid\Software\Microsoft\Windows\CurrentVersion\Run"
+
 Assert-TrustedRoot $root
 Assert-TrustedRoot $dataRoot
 Protect-Tree $root
@@ -197,17 +233,19 @@ $configPath = Join-Path $dataRoot 'service.json'
 $oldConfig = if (Test-Path -LiteralPath $configPath) { [IO.File]::ReadAllBytes($configPath) } else { $null }
 $oldService = Get-Service $serviceName -ErrorAction SilentlyContinue
 $wasRunning = $oldService -and $oldService.Status -ne 'Stopped'
-if ($oldService -and $oldService.Status -ne 'Stopped') {
-    Stop-Service $serviceName; $oldService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
-}
-Stop-OwnedApps
 $backup = $null
 if (Test-Path -LiteralPath $exe) {
-    $backup = Join-Path $root ('backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $backup = Join-Path $root ('backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
     Protect-Directory $backup
     Copy-Item -LiteralPath $exe -Destination (Join-Path $backup 'CrossMouse.exe')
 }
 try {
+    # Backup succeeded before stopping a working installation. From this point
+    # every mutation is inside the rollback boundary.
+    if ($oldService -and $oldService.Status -ne 'Stopped') {
+        Stop-Service $serviceName; $oldService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+    }
+    Stop-OwnedApps
     $newExe = Join-Path $root ('install-' + [guid]::NewGuid().ToString('N') + '.tmp')
     Copy-Item -LiteralPath $sourceExe -Destination $newExe
     Protect-ReadOnlyFile $newExe
@@ -231,26 +269,13 @@ try {
         Check-NativeResult 'Service configuration'
     }
     # Single-file native extraction is protected too; no SYSTEM DLLs in a user's Temp.
-    $serviceRegistry = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
     New-ItemProperty -Path $serviceRegistry -Name Environment -PropertyType MultiString -Force `
         -Value @('DOTNET_BUNDLE_EXTRACT_BASE_DIR=' + (Join-Path $dataRoot 'bundles')) | Out-Null
     & sc.exe failure $serviceName reset= 86400 actions= restart/3000/restart/10000/restart/30000 | Out-Host
     Check-NativeResult 'Service recovery'
-    if (!$CiTest) {
-        Remove-NetFirewallRule -Name 'CrossMouse-Input-LAN' -ErrorAction SilentlyContinue
-        New-NetFirewallRule -Name 'CrossMouse-Input-LAN' -DisplayName 'CrossMouse paired input - local subnet only' `
-            -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Program $exe -RemoteAddress LocalSubnet -Profile Any | Out-Null
-        # Preserve opt-in: replace an existing CrossMouse login entry, never create one silently.
-        $run = [Microsoft.Win32.Registry]::Users.OpenSubKey("$OwnerSid\Software\Microsoft\Windows\CurrentVersion\Run", $true)
-        if ($run) {
-            try {
-                if ($null -ne $run.GetValue('CrossMouse')) { $run.SetValue('CrossMouse', ('"' + $exe + '" --background')) }
-            } finally { $run.Dispose() }
-        }
-    }
+    $startedAt = [DateTime]::UtcNow
     Start-Service $serviceName
     (Get-Service $serviceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(15))
-    $startedAt = [DateTime]::UtcNow.AddSeconds(-3)
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $healthy = $false
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -266,16 +291,55 @@ try {
         if (Test-Path $lastError) { Get-Content $lastError | Write-Host }
         throw 'The service started but its interactive input agent did not become ready. Installation will roll back.'
     }
+    if ($CiFailAfterReady) { throw 'CI injected install failure after the new agent became ready.' }
+    # Publish the network/login entry only after the replacement is healthy.
+    # Never delete/recreate an existing rule, and roll back only our own writes.
+    if (!$CiTest) {
+        if (!$oldFirewall) {
+            New-NetFirewallRule -Name 'CrossMouse-Input-LAN' -DisplayName 'CrossMouse paired input - local subnet only' `
+                -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Program $exe -RemoteAddress LocalSubnet -Profile Any | Out-Null
+            $firewallCreated = $true
+        }
+        $run = [Microsoft.Win32.Registry]::Users.OpenSubKey($runPath, $true)
+        if ($run) {
+            try {
+                $oldRunCommand = $run.GetValue('CrossMouse')
+                if ($null -ne $oldRunCommand) {
+                    $runChanged = $true
+                    $run.SetValue('CrossMouse', ('"' + $exe + '" --background'))
+                }
+            } finally { $run.Dispose() }
+        }
+    }
     Write-Host "Installed: $exe"
     Write-Host 'Boot service is running. The paired Mac must still be signed in and connected to the local network.'
     Write-Host 'This does not automate Windows PIN/password entry or disable UAC.'
     if ($backup) { Write-Host "Rollback executable: $backup" }
     if (!$CiTest -and !$ElevatedStage) { Open-InstalledControls }
 } catch {
-    Stop-Service $serviceName -ErrorAction SilentlyContinue
+    $originalFailure = $_
+    $failedService = Get-Service $serviceName -ErrorAction SilentlyContinue
+    if ($failedService -and $failedService.Status -ne 'Stopped') {
+        Stop-Service $serviceName
+        $failedService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+    }
+    if ($firewallCreated) { Remove-NetFirewallRule -Name 'CrossMouse-Input-LAN' -ErrorAction SilentlyContinue }
+    if ($runChanged) {
+        $run = [Microsoft.Win32.Registry]::Users.OpenSubKey($runPath, $true)
+        if ($run) { try { $run.SetValue('CrossMouse', $oldRunCommand) } finally { $run.Dispose() } }
+    }
     if (!$oldService -and (Get-Service $serviceName -ErrorAction SilentlyContinue)) {
         & sc.exe delete $serviceName | Out-Host
-        Remove-NetFirewallRule -Name 'CrossMouse-Input-LAN' -ErrorAction SilentlyContinue
+    }
+    if ($oldServiceInfo) {
+        if ($null -ne $oldEnvironment) {
+            New-ItemProperty -LiteralPath $serviceRegistry -Name Environment -PropertyType MultiString -Value $oldEnvironment -Force | Out-Null
+        } else { Remove-ItemProperty -LiteralPath $serviceRegistry -Name Environment -ErrorAction SilentlyContinue }
+        if ($null -ne $oldRecovery) {
+            New-ItemProperty -LiteralPath $serviceRegistry -Name FailureActions -PropertyType Binary -Value $oldRecovery -Force | Out-Null
+        } else { Remove-ItemProperty -LiteralPath $serviceRegistry -Name FailureActions -ErrorAction SilentlyContinue }
+        $mode = switch ($oldServiceInfo.StartMode) { 'Auto' { 'Automatic' } 'Disabled' { 'Disabled' } default { 'Manual' } }
+        Set-Service -Name $serviceName -StartupType $mode
     }
     if ($oldConfig) { [IO.File]::WriteAllBytes($configPath, $oldConfig) }
     elseif (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath }
@@ -284,5 +348,5 @@ try {
         Copy-Item -LiteralPath (Join-Path $backup 'CrossMouse.exe') -Destination $exe -Force
         if ($wasRunning) { Start-Service $serviceName -ErrorAction SilentlyContinue }
     }
-    throw
+    throw $originalFailure
 }

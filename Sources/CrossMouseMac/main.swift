@@ -172,7 +172,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                         self.peerCapability = message.capability
                         self.peerVersion = message.version ?? "이전 수신기"
                         let peerStatus = "Windows \(self.peerVersion) · "
-                            + (message.serviceMode == true ? "로그인 전 서비스" : "로그인 후 앱")
+                            + (message.serviceMode.map { $0 ? "로그인 전 서비스" : "로그인 후 앱" } ?? "실행 방식 미확인")
                             + (message.inputDesktop.map { " · " + String($0.prefix(64)) } ?? "")
                             + (message.pointerState.map { " · " + String($0.prefix(100)) } ?? "")
                         let peerStatusChanged = self.peerStatus != peerStatus

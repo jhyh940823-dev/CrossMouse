@@ -1,7 +1,21 @@
+import Foundation
 import XCTest
 @testable import CrossMouseCore
 
 final class ReliabilityRegressionTests: XCTestCase {
+    func testReceiverDiagnosticsDecodeWithoutChangingLegacyPackets() throws {
+        let current = Data(#"{"type":"pong","version":"0.5.0","capability":"handoff-2","serviceMode":true,"inputDesktop":"Winlogon","pointerState":"surface:Winlogon"}"#.utf8)
+        let decoded = try JSONDecoder().decode(CrossMouseMessage.self, from: current)
+        XCTAssertEqual(decoded.serviceMode, true)
+        XCTAssertEqual(decoded.inputDesktop, "Winlogon")
+        XCTAssertEqual(decoded.pointerState, "surface:Winlogon")
+        XCTAssertEqual(try JSONDecoder().decode(CrossMouseMessage.self,
+            from: JSONEncoder().encode(decoded)), decoded)
+        let legacy = try JSONDecoder().decode(CrossMouseMessage.self, from: Data(#"{"type":"pong"}"#.utf8))
+        XCTAssertNil(legacy.serviceMode)
+        XCTAssertNil(legacy.inputDesktop)
+        XCTAssertNil(legacy.pointerState)
+    }
     func testLostF8ReleaseCannotDisableFuturePressesForever() {
         for source in [DisplayReturnShortcut.Source.functionF8, .playPause] {
             var key = DisplayReturnShortcut()

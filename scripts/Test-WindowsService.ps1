@@ -26,6 +26,33 @@ try {
     $exe = Join-Path $env:ProgramFiles 'CrossMouse\CrossMouse.exe'
     $process = Start-Process $exe -ArgumentList '--service-boundary-test' -NoNewWindow -PassThru -Wait
     if ($process.ExitCode -ne 0) { throw "Service desktop test failed: $($process.ExitCode)" }
+    # A failed upgrade must restore the last working binary/configuration and
+    # restart the previously running agent; not merely leave files on disk.
+    $beforeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+    $config = Join-Path $env:ProgramData 'CrossMouse\service.json'
+    $beforeConfig = [IO.File]::ReadAllText($config)
+    $injected = $false
+    try {
+        & (Join-Path $PSScriptRoot 'Install-Windows.ps1') -InstallService -CiTest -CiFailAfterReady -Port 49439
+    } catch {
+        if ($_.Exception.Message -notmatch 'CI injected install failure') { throw }
+        $injected = $true
+    }
+    if (!$injected -or (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $beforeHash -or
+        [IO.File]::ReadAllText($config) -ne $beforeConfig -or (Get-Service $serviceName).Status -ne 'Running') {
+        throw 'Failed upgrade did not restore the previous executable, configuration and running service.'
+    }
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $state = Get-Content $status -Raw | ConvertFrom-Json
+        if ($state.State -in @('Waiting', 'Connected') -and
+            (Get-Process -Id $state.AgentPid -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if (!(Get-Process -Id $state.AgentPid -ErrorAction SilentlyContinue)) { throw 'Rollback agent did not restart.' }
+    $process = Start-Process $exe -ArgumentList '--service-boundary-test' -NoNewWindow -PassThru -Wait
+    if ($process.ExitCode -ne 0) { throw 'Restored service failed its encrypted desktop/input check.' }
+    Write-Host 'PASS failed upgrade restores binary/configuration and authenticated input service'
     Stop-Service $serviceName
     (Get-Service $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
     Start-Sleep -Seconds 2
