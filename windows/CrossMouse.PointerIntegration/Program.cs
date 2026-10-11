@@ -44,7 +44,7 @@ internal static class Program
             <input id=text class=box value="Text cursor fixture" style="cursor:text">
             <div id=resize class=box style="cursor:ew-resize">Resize cursor fixture</div>
             <div id=hidden class=box style="cursor:none">Hidden native cursor: fallback must remain visible</div>
-            <button id=folder class=box onclick="document.querySelector('#files').click()">Open isolated folder picker</button>
+            <button id=folder class=box onclick="window.folderClicks=(window.folderClicks||0)+1;document.querySelector('#files').click()">Open isolated folder picker</button>
             <input id=files type=file webkitdirectory hidden>
             """);
         var start = new ProcessStartInfo(chrome) { UseShellExecute = false };
@@ -110,18 +110,33 @@ internal static class Program
             Require((await cdp.EvaluateAsync("window.clickCount||0", token)).GetInt32() == 1, "Pointer overlay intercepted Chrome click.");
             Console.WriteLine("PASS production default pointer across Chrome hand/text/resize/hidden/text/hand; no forced fallback; click-through verified");
 
+            await cdp.CallAsync("Page.bringToFront", new { }, token);
+            await cdp.EvaluateAsync("document.querySelector('#folder').scrollIntoView({block:'center'});true", token);
+            await Task.Delay(60, token);
             Point folder = await ElementPoint(cdp, "folder", token);
-            Native.SetCursorPos(folder.X, folder.Y); Native.WakePointerAt(folder.X, folder.Y);
+            Require(Native.SetCursorPos(folder.X, folder.Y) && Native.WakePointerAt(folder.X, folder.Y),
+                "Folder button pointer placement failed.");
             await Task.Delay(80, token);
-            Native.MouseButton(0, true); Native.MouseButton(0, false);
-            for (int attempt = 0; attempt < 40; attempt++)
+            Require(Native.MouseButton(0, true) && Native.MouseButton(0, false), "Folder button injection rejected.");
+            // Shell first-use startup is asynchronous. Wait for an actual
+            // native dialog, not a fixed short delay or a JavaScript substitute.
+            var dialogWait = Stopwatch.StartNew();
+            while (dialogWait.Elapsed < TimeSpan.FromSeconds(12))
             {
                 nint foreground = GetForegroundWindow();
                 var name = new StringBuilder(100); GetClassNameW(foreground, name, name.Capacity);
                 if (name.ToString() == "#32770") { dialog = foreground; break; }
                 await Task.Delay(100, token);
             }
+            if (dialog == 0)
+            {
+                int clicks = (await cdp.EvaluateAsync("window.folderClicks||0", token)).GetInt32();
+                var foregroundName = new StringBuilder(100);
+                GetClassNameW(GetForegroundWindow(), foregroundName, foregroundName.Capacity);
+                Console.WriteLine($"Folder readiness failure: DOM click count={clicks}, foreground class={foregroundName}");
+            }
             Require(dialog != 0 && GetWindowRect(dialog, out _), "Chrome's real folder dialog did not open.");
+            Console.WriteLine($"MEASURE actual Chrome native folder ready after {dialogWait.ElapsedMilliseconds}ms");
             GetWindowRect(dialog, out var bounds);
             var center = new Point((bounds.Left + bounds.Right) / 2, (bounds.Top + bounds.Bottom) / 2);
             Native.SetCursorPos(center.X, center.Y); Native.WakePointerAt(center.X, center.Y);
@@ -130,6 +145,28 @@ internal static class Program
                 () => Volatile.Write(ref active, 1), Path.Combine(evidence, "chrome-folder-dialog.png"), token);
             PostMessageW(dialog, 0x10, 0, 0); dialog = 0;
             Console.WriteLine("PASS visible pointer over native Chrome folder-selection dialog; no files selected");
+        }
+        catch
+        {
+            // An owned CI browser can fail before the usual tiny pointer
+            // crops. Preserve the foreground fixture for diagnosis, not merely
+            // a green rerun. This program refuses to run on a user's desktop.
+            try
+            {
+                if (GetWindowRect(GetForegroundWindow(), out var failureBounds))
+                {
+                    var region = Rectangle.Intersect(SystemInformation.VirtualScreen,
+                        Rectangle.FromLTRB(failureBounds.Left, failureBounds.Top, failureBounds.Right, failureBounds.Bottom));
+                    if (region.Width > 0 && region.Height > 0)
+                    {
+                        Directory.CreateDirectory(Path.Combine("diagnostics", "cursor-renders"));
+                        using var failure = Crop(region);
+                        failure.Save(Path.Combine("diagnostics", "cursor-renders", "chrome-failure-context.png"), ImageFormat.Png);
+                    }
+                }
+            }
+            catch (Exception) { /* preserve the original failure */ }
+            throw;
         }
         finally
         {
