@@ -222,11 +222,12 @@ internal sealed class PointerSurfaceThread : IDisposable
                     return false;
                 }
                 StackingRepairs++;
-                if (HasOverlappingWindowAbove())
-                {
-                    Failure = "pointer-occluded";
-                    return false;
-                }
+                // Do not infer a fatal failure solely from another HWND's
+                // bounds: it might be transparent or belong to a higher OS
+                // band. Request the supported ordering of OUR surface only.
+                // The compositor regression verifies real visible pixels;
+                // production does not inspect user screenshots or weaken UI
+                // isolation to promote itself into protected shell bands.
             }
             return true;
         }
