@@ -25,7 +25,8 @@ internal sealed class PointerPresenter : IDisposable
         get
         {
             lock (_sync)
-                return _thread?.Failure ?? (_thread?.IsPresented == true ? "surface:" + _desktop : "not-presented");
+                return _thread?.Failure ?? (_thread?.IsPresented == true
+                    ? "surface:" + _desktop + ";stack-repairs:" + _thread.StackingRepairs : "not-presented");
         }
     }
     private PointerSurfaceThread? Current(bool retryFailed = false)
@@ -58,7 +59,9 @@ internal sealed class PointerSurfaceThread : IDisposable
     private int _refreshQueued;
     private string? _failure;
     private int _presented;
+    private int _stackingRepairs;
     internal string? Failure => Volatile.Read(ref _failure);
+    internal int StackingRepairs => Volatile.Read(ref _stackingRepairs);
     internal bool IsPresented => Volatile.Read(ref _presented) != 0 && Volatile.Read(ref _disposed) == 0;
     internal PointerSurfaceThread(Func<bool> active,
         Action? observedFrameForTest, string expectedDesktop)
@@ -131,7 +134,9 @@ internal sealed class PointerSurfaceThread : IDisposable
         {
             bool visible = surface.RefreshPointer();
             Volatile.Write(ref _presented, visible ? 1 : 0);
-            Volatile.Write(ref _failure, _active() && !visible ? "pointer-presentation-failed" : null);
+            Volatile.Write(ref _stackingRepairs, surface.StackingRepairs);
+            Volatile.Write(ref _failure, _active() && !visible
+                ? surface.Failure ?? "pointer-presentation-failed" : null);
             return visible;
         }
         catch (Exception error) when (error is ArgumentException or ExternalException or InvalidOperationException)
@@ -166,6 +171,8 @@ internal sealed class PointerSurfaceThread : IDisposable
         private LayeredCursorImage? _image;
         private nint _cursorHandle;
         private readonly Action? _observedFrameForTest;
+        internal int StackingRepairs { get; private set; }
+        internal string? Failure { get; private set; }
         internal Surface(Func<bool> active, Action? observedFrameForTest)
         {
             _active = active;
@@ -181,6 +188,7 @@ internal sealed class PointerSurfaceThread : IDisposable
         }
         internal bool RefreshPointer()
         {
+            Failure = null;
             if (!_active()) { if (Visible) Hide(); return false; }
             _observedFrameForTest?.Invoke();
             var info = new CursorInfo { Size = Marshal.SizeOf<CursorInfo>() };
@@ -199,7 +207,52 @@ internal sealed class PointerSurfaceThread : IDisposable
                 _image.Raster.Width, _image.Raster.Height);
             if (!Visible) Show();
             if (!_image.Present(Handle, info.Position)) { Hide(); return false; }
+            // UpdateLayeredWindow can succeed while a later topmost popup
+            // covers this HWND. TopMost assigns a GROUP, not permanent first
+            // position within that group. Keep stacking as part of the same
+            // frame's presentation contract, even for a stationary pointer.
+            // The previous tests hid/showed this Form before every sample,
+            // inadvertently repairing the z-order themselves.
+            if (HasOverlappingWindowAbove())
+            {
+                if (!SetWindowPos(Handle, new nint(-1), 0, 0, 0, 0,
+                    0x0001 | 0x0002 | 0x0010 | 0x0200)) // NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
+                {
+                    Failure = "pointer-stacking:" + Marshal.GetLastWin32Error();
+                    return false;
+                }
+                StackingRepairs++;
+                if (HasOverlappingWindowAbove())
+                {
+                    Failure = "pointer-occluded";
+                    return false;
+                }
+            }
             return true;
+        }
+        private bool HasOverlappingWindowAbove()
+        {
+            // Read geometry only: no window titles, processes, screenshots or
+            // hooks in other applications. Traverse a bounded snapshot; never
+            // spin if another application continuously changes the window list.
+            const uint previous = 3; // GW_HWNDPREV
+            Rectangle footprint = Bounds;
+            nint window = GetWindow(Handle, previous);
+            for (int inspected = 0; window != 0 && inspected < 256; inspected++)
+            {
+                if (IsWindowVisible(window) && !IsIconic(window) && GetWindowRect(window, out var rect) &&
+                    footprint.IntersectsWith(Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom)))
+                {
+                    // Cloaked windows retain VISIBLE but are not composed on
+                    // this desktop (e.g. a different Windows virtual desktop).
+                    int result = DwmGetWindowAttribute(window, 14, out uint cloaked, sizeof(uint));
+                    if (result != 0 || cloaked == 0) return true;
+                }
+                nint next = GetWindow(window, previous);
+                if (next == window) return true;
+                window = next;
+            }
+            return window != 0;
         }
         protected override void WndProc(ref Message message)
         {
@@ -211,5 +264,15 @@ internal sealed class PointerSurfaceThread : IDisposable
         protected override void OnPaint(PaintEventArgs e) { }
         protected override void Dispose(bool disposing)
         { if (disposing) { _image?.Dispose(); _image = null; } base.Dispose(disposing); }
+
+        [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+        [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(nint window, out Rect rect);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint window);
+        [DllImport("user32.dll")] private static extern bool IsIconic(nint window);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint after,
+            int x, int y, int width, int height, uint flags);
+        [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(nint window,
+            uint attribute, out uint value, int size);
     }
 }

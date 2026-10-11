@@ -138,7 +138,8 @@ internal static class ServiceBoundaryRegression
             await peer.SendAsync(new MouseMessage { Type = "ping" }, bound.Token);
             var state = await peer.ReadAsync(bound.Token);
             Require(state.Type == "pong", $"Focus lost during desktop transition: {state.Type}/{state.Reason}");
-            if (state.InputDesktop == name && state.PointerState == "surface:" + name) return;
+            if (state.InputDesktop == name && state.PointerState?.StartsWith(
+                "surface:" + name + ";stack-repairs:", StringComparison.Ordinal) == true) return;
             await Task.Delay(25, bound.Token);
         }
     }
