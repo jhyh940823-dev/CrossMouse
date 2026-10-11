@@ -57,6 +57,28 @@ upgrade/rollback tests remain enabled. Physical user-PC verification is separate
 Windows becomes v0.5.1. Mac remains v0.5.0 and understands the existing protocol.
 The installer health check expects v0.5.1 and reuses the existing service/key.
 
+## Recorded validation
+
+Final source/test commit: `c74faa0985d18c0eb7e04e3f642196ab098a80c9`.
+Run `38105042055` completed successfully for both Windows and Mac. In the same
+continuous-pointer test the old implementation had zero visible cursor pixels;
+the fixed path recorded `reported=True, pixels=196, surface:Default;stack-repairs:1`.
+The initial popup, 12 repeated raises, click-through, dismissal and release checks
+all passed. The before/after tiny fixture screenshots were visually inspected.
+
+Chrome hand/text/resize/hidden transitions and its actual native folder picker
+passed. One intermediate run (`38104782622`) had failed to open the folder picker;
+it had already passed the new occlusion test. The final test explicitly places
+the folder button in view, checks native injection success, waits for a real
+dialog and preserves failure context rather than assuming a short startup time.
+The final native dialog appeared after 832 ms. Pixel assertions were not relaxed.
+Existing native-X, timing, idle-input, authenticated receive lease and service
+desktop/failed-upgrade rollback checks also passed in the final run.
+
+The live Windows service was only observed as v0.5.0 during this task. This
+v0.5.1 Windows update has NOT yet been applied to or confirmed on the user's PC.
+The running Mac application, keys, F8 behavior and saved 37% speed were untouched.
+
 ## Official contract
 
 - [Window z-order and topmost groups](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features)
