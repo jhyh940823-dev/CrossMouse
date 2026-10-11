@@ -13,6 +13,7 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     var onAutoSwitch: ((Bool) -> Void)?
     var onDVIRequest: (() -> Void)?
     var onPointerSpeed: ((Double) -> Void)?
+    var onClipboardSharing: ((Bool) -> Void)?
     var onLoginItem: ((Bool) -> Void)?
     var onLoginSettings: (() -> Void)?
 
@@ -39,16 +40,18 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     )
     private let loginSettingsButton = NSButton(title: "로그인 항목 설정", target: nil, action: nil)
     private let loginStatusLabel = NSTextField(labelWithString: "")
+    private let clipboardCheck = NSButton(checkboxWithTitle: "Mac → Windows 텍스트 클립보드 공유", target: nil, action: nil)
+    private let clipboardStatusLabel = NSTextField(labelWithString: "")
 
     init() {
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 590, height: 640),
+            contentRect: CGRect(x: 0, y: 0, width: 590, height: 720),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "CrossMouse v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")
-        window.minSize = NSSize(width: 565, height: 630)
+        window.minSize = NSSize(width: 565, height: 710)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         placeOnSamsung()
@@ -129,6 +132,14 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
         loginStatusLabel.textColor = .secondaryLabelColor
         loginStatusLabel.maximumNumberOfLines = 0
         loginStatusLabel.lineBreakMode = .byWordWrapping
+        clipboardCheck.target = self
+        clipboardCheck.action = #selector(toggleClipboard)
+        clipboardCheck.font = .systemFont(ofSize: 12)
+        clipboardCheck.toolTip = "Windows로 진입할 때만 새 텍스트를 암호화해 보냅니다. 이미지·파일·보호 표시된 클립보드는 제외합니다."
+        clipboardStatusLabel.font = .systemFont(ofSize: 12)
+        clipboardStatusLabel.textColor = .secondaryLabelColor
+        clipboardStatusLabel.maximumNumberOfLines = 0
+        clipboardStatusLabel.lineBreakMode = .byWordWrapping
 
         let modeRow = NSStackView(views: [macButton, windowsButton])
         modeRow.orientation = .horizontal
@@ -152,6 +163,7 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
             title, subtitle, statusLabel, section, modeRow,
             modeDescription, diagnosticsLabel, ddcRow,
             autoSwitchCheck, monitorStatusLabel, pointerSpeedRow, dviRequestButton, dviHint,
+            clipboardCheck, clipboardStatusLabel,
             loginRow, loginStatusLabel,
             actionRow, noteLabel
         ])
@@ -178,6 +190,11 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     func renderPointerSpeed(_ percent: Double) {
         pointerSpeedSlider.doubleValue = percent
         pointerSpeedValue.stringValue = "\(Int(percent))%"
+    }
+
+    func renderClipboard(enabled: Bool, status: String) {
+        clipboardCheck.state = enabled ? .on : .off
+        clipboardStatusLabel.stringValue = status
     }
 
     func render(connected: Bool, connecting: Bool, windowsMode: Bool,
@@ -252,6 +269,7 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
     }
     @objc private func requestDVI() { onDVIRequest?() }
     @objc private func changePointerSpeed() { onPointerSpeed?(pointerSpeedSlider.doubleValue) }
+    @objc private func toggleClipboard() { onClipboardSharing?(clipboardCheck.state == .on) }
     @objc private func toggleLoginItem() { onLoginItem?(loginCheck.state != .off) }
     @objc private func openLoginSettings() { onLoginSettings?() }
 }

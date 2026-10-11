@@ -37,6 +37,11 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
     public var inputDesktop: String?
     public var serviceMode: Bool?
     public var pointerState: String?
+    public var clipboardCapability: String?
+    public var clipboardId: String?
+    public var clipboardBytes: Int?
+    public var clipboardIndex: Int?
+    public var clipboardData: String?
 
     public init(
         type: String,
@@ -57,7 +62,12 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
         motionTimeUs: Int64? = nil,
         inputDesktop: String? = nil,
         serviceMode: Bool? = nil,
-        pointerState: String? = nil
+        pointerState: String? = nil,
+        clipboardCapability: String? = nil,
+        clipboardId: String? = nil,
+        clipboardBytes: Int? = nil,
+        clipboardIndex: Int? = nil,
+        clipboardData: String? = nil
     ) {
         self.type = type
         self.dx = dx
@@ -78,6 +88,11 @@ public struct CrossMouseMessage: Codable, Equatable, Sendable {
         self.inputDesktop = inputDesktop
         self.serviceMode = serviceMode
         self.pointerState = pointerState
+        self.clipboardCapability = clipboardCapability
+        self.clipboardId = clipboardId
+        self.clipboardBytes = clipboardBytes
+        self.clipboardIndex = clipboardIndex
+        self.clipboardData = clipboardData
     }
 }
 

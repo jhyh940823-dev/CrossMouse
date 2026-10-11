@@ -90,6 +90,16 @@ internal static class ServiceBoundaryRegression
             await peer.SendAsync(new MouseMessage { Type = "prepare", TransferId = transfer }, token);
             var prepared = await peer.ReadAsync(token);
             Require(prepared.Type == "prepared", $"Preparation failed on alternate input desktop: {prepared.Type}/{prepared.Reason}");
+            Require(await ClipboardRegression.UploadAsync(peer, transfer, "service clipboard 한글🙂", token) == "ok",
+                "SYSTEM interactive agent failed to set the Default clipboard.");
+            Require(ClipboardRegression.ReadFixtureText() == "service clipboard 한글🙂",
+                "Clipboard not readable outside the SYSTEM agent.");
+            Require(SwitchDesktop(desktop), "Clipboard non-Default guard test could not switch desktop.");
+            await peer.SendAsync(new MouseMessage { Type = "clipboard-begin", TransferId = transfer,
+                ClipboardId = Guid.NewGuid().ToString(), ClipboardBytes = 4 }, token);
+            Require((await peer.ReadAsync(token)).Reason == "unavailable", "Clipboard allowed on a non-Default desktop.");
+            Require(SwitchDesktop(original), "Clipboard test could not restore Default.");
+            Console.WriteLine("PASS SYSTEM Default clipboard reaches other process; non-Default clipboard write rejected");
             await peer.SendAsync(new MouseMessage { Type = "enter", TransferId = transfer, CenterCursor = true }, token);
             var entered = await peer.ReadAsync(token);
             Require(entered.Type == "entered" && entered.PointerVisible == true && entered.TransferId == transfer,

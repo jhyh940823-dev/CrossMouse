@@ -80,6 +80,10 @@ jobs:
         if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
         timeout-minutes: 2
         run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --peer-lease-test
+      - name: One-way clipboard Unicode, real paste and bounded failures
+        if: ${{ !cancelled() && steps.build_gui.outcome == 'success' }}
+        timeout-minutes: 2
+        run: dotnet run --no-build -c Release --project windows/CrossMouse.Windows.App -- --clipboard-test
       - name: Cursor render evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4

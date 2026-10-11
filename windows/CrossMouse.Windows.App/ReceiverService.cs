@@ -158,6 +158,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                     StatusChanged?.Invoke(ReceiverState.Connected, "Mac 연결됨 · 입력 공유 준비됨");
                     using var sessionCancel =
                         CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    using var clipboard = new TextClipboardTransfer();
                     sessionCancel.CancelAfter(PeerSilenceLimit);
                     var returnPoll = CheckLeftBoundaryAsync(channel, sessionCancel.Token);
                     var render = RenderMouseAsync(sessionCancel.Token);
@@ -183,6 +184,7 @@ internal sealed class ReceiverService : IAsyncDisposable
                             {
                                 await channel.SendAsync(
                                     new MouseMessage { Type = "pong", Capability = HandoffCapability,
+                                        ClipboardCapability = TextClipboardTransfer.Capability,
                                         Version = typeof(ReceiverService).Assembly.GetName().Version?.ToString(3),
                                         InputDesktop = InputDesktopAccess.CurrentName(),
                                         ServiceMode = System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem,
@@ -194,14 +196,22 @@ internal sealed class ReceiverService : IAsyncDisposable
                             }
                             if (message.Type == "prepare" && message.TransferId is { Length: > 0 and <= 64 })
                             {
+                                clipboard.Dispose();
                                 StartPreparation(message.TransferId, channel, sessionCancel.Token);
+                                continue;
+                            }
+                            if (message.Type.StartsWith("clipboard-", StringComparison.Ordinal))
+                            {
+                                await ReceiveClipboardAsync(message, clipboard, channel, sessionCancel.Token).ConfigureAwait(false);
                                 continue;
                             }
                             if (message.Type == "enter" && message.TransferId is not null)
                             {
+                                clipboard.Dispose();
                                 StartAcquisition(message, channel, sessionCancel.Token);
                                 continue;
                             }
+                            if (message.Type == "leave") clipboard.Dispose();
                             lock (_handoff)
                             {
                                 // Never replay input from a cancelled/previous ownership epoch.
@@ -374,6 +384,45 @@ internal sealed class ReceiverService : IAsyncDisposable
                 .SelectMany(n => n.GetIPProperties().UnicastAddresses).Any(a => a.Address.Equals(address));
         }
         catch (System.Net.NetworkInformation.NetworkInformationException) { return true; }
+    }
+
+    private bool CanReceiveClipboard(string? transferId)
+    {
+        lock (_handoff)
+            return transferId is not null && _preparedId == transferId && _activeId is null &&
+                _target is not null && _activationCancel is { IsCancellationRequested: false };
+    }
+
+    private async Task ReceiveClipboardAsync(MouseMessage message, TextClipboardTransfer transfer,
+        SecureChannel channel, CancellationToken token)
+    {
+        // Extension lives on the existing authenticated reader. Never accepts
+        // unsolicited idle writes, active/old leases, or pre-login/UAC payloads.
+        if (!Guid.TryParse(message.ClipboardId, out _) || message.TransferId is not { Length: > 0 and <= 64 })
+        { transfer.Dispose(); return; }
+        string? status = null;
+        if (!CanReceiveClipboard(message.TransferId) || !TextClipboardWriter.IsDefaultDesktop)
+        { transfer.Dispose(); status = "unavailable"; }
+        else switch (message.Type)
+        {
+            case "clipboard-begin":
+                if (!transfer.Begin(message, TextClipboardWriter.Sequence)) status = "invalid";
+                break;
+            case "clipboard-chunk":
+                if (!transfer.Append(message)) status = "invalid";
+                break;
+            case "clipboard-abort": transfer.Dispose(); return;
+            case "clipboard-commit":
+                uint sequence = transfer.SequenceAtBegin;
+                string? text = transfer.Finish(message);
+                status = text is null ? "invalid" : await TextClipboardWriter.WriteAsync(text, sequence,
+                    () => !token.IsCancellationRequested && CanReceiveClipboard(message.TransferId), token).ConfigureAwait(false);
+                break;
+            default: transfer.Dispose(); status = "invalid"; break;
+        }
+        if (status is not null)
+            await channel.SendAsync(new MouseMessage { Type = "clipboard-result", TransferId = message.TransferId,
+                ClipboardId = message.ClipboardId, Reason = status }, token).ConfigureAwait(false);
     }
 
     private void StartPreparation(string id, SecureChannel channel, CancellationToken session)

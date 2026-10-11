@@ -110,6 +110,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         (UserDefaults.standard.object(forKey: "CrossMouse.windowsPointerSpeedPercent") as? NSNumber)?.doubleValue
             ?? PointerMotionScale.defaultPercent)
     private var peerCapability: String?
+    private var peerClipboardCapability: String?
+    private let textClipboard = MacTextClipboard()
+    private var clipboardEnabled = UserDefaults.standard.bool(forKey: "CrossMouse.shareTextClipboard")
+    private var clipboardStatus = "Windows로 커서를 넘길 때 새로 복사한 텍스트를 공유합니다."
+    private var pendingClipboard: (transferId: String, id: String, changeCount: Int)?
     private var peerVersion = "확인되지 않음"
     private var peerStatus = ""
     private let physicalPointer = MacPhysicalPointer()
@@ -150,6 +155,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     self.connected = value
                     self.peerCapability = nil
+                    self.peerClipboardCapability = nil
                     self.peerStatus = ""
                     self.receiverLiveness.reset()
                     self.receiverResponsive = false
@@ -162,6 +168,10 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 }
             },
             onMessage: { [weak self] message in
+                if message.type == "clipboard-result" {
+                    DispatchQueue.main.async { self?.receiveClipboardResult(message) }
+                    return
+                }
                 if message.transferId != nil {
                     DispatchQueue.main.async { self?.receiveAutomaticMessage(message) }
                     return
@@ -170,6 +180,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.async {
                         guard let self, self.connected, self.connectionWanted else { return }
                         self.peerCapability = message.capability
+                        self.peerClipboardCapability = message.clipboardCapability
                         self.peerVersion = message.version ?? "이전 수신기"
                         let peerStatus = "Windows \(self.peerVersion) · "
                             + (message.serviceMode.map { $0 ? "로그인 전 서비스" : "로그인 후 앱" } ?? "실행 방식 미확인")
@@ -290,6 +301,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         controlWindow.onAutoSwitch = { [weak self] enabled in self?.setAutoInputSwitch(enabled) }
         controlWindow.onDVIRequest = { [weak self] in self?.requestMacDisplay() }
         controlWindow.onPointerSpeed = { [weak self] value in self?.setPointerSpeed(value) }
+        controlWindow.onClipboardSharing = { [weak self] value in self?.setClipboardSharing(value) }
         controlWindow.onLoginItem = { [weak self] enabled in self?.setLoginItem(enabled) }
         controlWindow.onLoginSettings = { MacLoginItem.openSettings() }
     }
@@ -587,11 +599,89 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
 
     private func sendPreparedEntry(_ id: String) {
         guard automaticHandoff.phase == .acquiring(id) else { return }
+        guard clipboardEnabled, peerClipboardCapability == TextClipboardWire.capability else {
+            if clipboardEnabled { clipboardStatus = "텍스트 공유에는 Windows v0.5.2 이상이 필요합니다." }
+            sendEntryAfterClipboard(id)
+            return
+        }
+        switch textClipboard.read(.general) {
+        case .text(let snapshot):
+            let clipboardId = UUID().uuidString
+            guard let frames = TextClipboardWire.frames(snapshot.text, transferId: id, clipboardId: clipboardId) else {
+                clipboardStatus = "지원하지 않는 텍스트 · Windows 클립보드 유지"
+                sendEntryAfterClipboard(id); return
+            }
+            pendingClipboard = (id, clipboardId, snapshot.changeCount)
+            clipboardStatus = "텍스트를 Windows에 전달하는 중…"
+            network.sendClipboard(frames, id: clipboardId)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                guard let self, self.pendingClipboard?.id == clipboardId else { return }
+                self.cancelClipboardTransfer()
+                self.clipboardStatus = "텍스트 공유 시간 초과 · 마우스 연결은 계속합니다."
+                self.sendEntryAfterClipboard(id)
+                self.updateMenu()
+            }
+        case .unchanged:
+            clipboardStatus = "새 복사 없음 · Windows에서 복사한 내용은 유지합니다."
+            sendEntryAfterClipboard(id)
+        case .excluded:
+            clipboardStatus = "보호 표시된 내용·파일은 공유하지 않습니다."
+            sendEntryAfterClipboard(id)
+        case .tooLarge:
+            clipboardStatus = "텍스트 256KB 초과 · Windows 클립보드를 유지합니다."
+            sendEntryAfterClipboard(id)
+        case .unavailable:
+            clipboardStatus = "복사한 텍스트 없음 · 이미지·파일은 아직 지원하지 않습니다."
+            sendEntryAfterClipboard(id)
+        }
+        updateMenu()
+    }
+
+    private func sendEntryAfterClipboard(_ id: String) {
+        guard automaticHandoff.phase == .acquiring(id), connected, connectionWanted else { return }
         network.send(CrossMouseMessage(type: "enter", fractionY: automaticHandoff.entryFractionY,
             centerCursor: automaticHandoff.switchesDisplayOnEntry, transferId: id))
     }
 
+    private func receiveClipboardResult(_ message: CrossMouseMessage) {
+        guard let pending = pendingClipboard, message.clipboardId == pending.id,
+              message.transferId == pending.transferId,
+              automaticHandoff.phase == .acquiring(pending.transferId) else { return }
+        network.cancelClipboard(pending.id)
+        pendingClipboard = nil
+        if message.reason == "ok" {
+            textClipboard.acknowledge(changeCount: pending.changeCount)
+            clipboardStatus = "텍스트 공유 완료 · Windows에서 Ctrl+V로 붙여넣으세요."
+        } else {
+            // Status is selected locally, not echoed from peer-supplied text.
+            clipboardStatus = message.reason == "local-changed"
+                ? "Windows에서 새로 복사한 내용이 있어 덮어쓰지 않았습니다."
+                : "텍스트 공유 보류 · 잠금/권한 화면 또는 클립보드 사용 중입니다."
+        }
+        sendEntryAfterClipboard(pending.transferId)
+        updateMenu()
+    }
+
+    private func cancelClipboardTransfer() {
+        guard let pending = pendingClipboard else { return }
+        pendingClipboard = nil
+        network.cancelClipboard(pending.id)
+        network.send(CrossMouseMessage(type: "clipboard-abort", transferId: pending.transferId, clipboardId: pending.id))
+    }
+
+    private func setClipboardSharing(_ enabled: Bool) {
+        clipboardEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "CrossMouse.shareTextClipboard")
+        if !enabled, let pending = pendingClipboard {
+            cancelClipboardTransfer()
+            sendEntryAfterClipboard(pending.transferId)
+        }
+        clipboardStatus = enabled ? "Windows로 이동할 때 새 텍스트만 공유 · 이미지·파일 제외" : "클립보드 공유 꺼짐"
+        updateMenu()
+    }
+
     private func cancelAutomaticEntry() {
+        cancelClipboardTransfer()
         if let id = automaticHandoff.cancel() {
             traceTransfer("cancel", id: id)
             network?.send(CrossMouseMessage(type: "leave", transferId: id, reason: "cancel"))
@@ -814,6 +904,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             displayKnown: automaticHandoff.hasCurrentDisplaySelection
         )
         controlWindow?.renderPointerSpeed(pointerMotion.percent)
+        controlWindow?.renderClipboard(enabled: clipboardEnabled, status: clipboardStatus)
     }
 
     private func refreshDisplay() {

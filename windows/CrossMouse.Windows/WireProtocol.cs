@@ -29,6 +29,11 @@ internal sealed class MouseMessage
     public string? InputDesktop { get; set; }
     public bool? ServiceMode { get; set; }
     public string? PointerState { get; set; }
+    public string? ClipboardCapability { get; set; }
+    public string? ClipboardId { get; set; }
+    public int? ClipboardBytes { get; set; }
+    public int? ClipboardIndex { get; set; }
+    public string? ClipboardData { get; set; }
 }
 
 internal static class WireProtocol

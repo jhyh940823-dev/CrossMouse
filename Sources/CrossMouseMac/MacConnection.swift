@@ -23,6 +23,7 @@ final class MacConnection: @unchecked Sendable {
     private var pendingMoveX = 0
     private var pendingMoveY = 0
     private var pendingTransferId: String?
+    private var clipboardUpload: String?
 
     init(
         host: String,
@@ -69,6 +70,7 @@ final class MacConnection: @unchecked Sendable {
         queue.async { [self] in
             guard !self.stopped else { return }
             guard self.sessionKey != nil else { return }
+            if message.type == "leave" || message.type == "prepare" { self.clipboardUpload = nil }
             if message.type == "move" {
                 if self.pendingTransferId != message.transferId { self.flushMotion() }
                 self.pendingTransferId = message.transferId
@@ -80,6 +82,38 @@ final class MacConnection: @unchecked Sendable {
                 self.sendFrame(message)
             }
         }
+    }
+
+    /// Bounded, completion-paced upload. Input/heartbeat frames may interleave,
+    /// and cancelling/reconnecting drops the remaining old clipboard frames.
+    func sendClipboard(_ frames: [CrossMouseMessage], id: String) {
+        queue.async { [self] in
+            guard !stopped, let socket = connection, sessionKey != nil else { return }
+            clipboardUpload = id
+            flushMotion()
+            sendClipboardFrame(frames, index: 0, id: id, socket: socket)
+        }
+    }
+
+    func cancelClipboard(_ id: String) {
+        queue.async { [self] in
+            if clipboardUpload == id { clipboardUpload = nil }
+        }
+    }
+
+    private func sendClipboardFrame(_ frames: [CrossMouseMessage], index: Int, id: String, socket: NWConnection) {
+        guard !stopped, connection === socket, clipboardUpload == id, let key = sessionKey else { return }
+        guard index < frames.count else { clipboardUpload = nil; return }
+        do {
+            let frame = try CrossMouseWire.frame(frames[index], sessionKey: key,
+                sequence: sendSequence, direction: .macToWindows)
+            sendSequence += 1
+            socket.send(content: frame, completion: .contentProcessed { [weak self, weak socket] error in
+                guard let self, let socket else { return }
+                if error != nil { self.disconnect(ifCurrent: socket); return }
+                self.sendClipboardFrame(frames, index: index + 1, id: id, socket: socket)
+            })
+        } catch { clipboardUpload = nil } // No content-bearing encoding errors in logs.
     }
 
     private func flushMotion() {
@@ -122,6 +156,7 @@ final class MacConnection: @unchecked Sendable {
         pendingMoveX = 0
         pendingMoveY = 0
         pendingTransferId = nil
+        clipboardUpload = nil
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let socket = NWConnection(
@@ -216,6 +251,7 @@ final class MacConnection: @unchecked Sendable {
         pendingMoveX = 0
         pendingMoveY = 0
         pendingTransferId = nil
+        clipboardUpload = nil
         if wasConnected { onConnected(false) }
         guard !stopped else { return }
         queue.asyncAfter(deadline: .now() + .seconds(2)) { [weak self] in

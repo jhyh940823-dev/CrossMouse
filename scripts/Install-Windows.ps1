@@ -291,7 +291,7 @@ try {
         try {
             $status = Get-Content -LiteralPath (Join-Path $dataRoot 'status.json') -Raw | ConvertFrom-Json
             if ([DateTime]$status.UpdatedUtc -ge $startedAt -and $status.SessionId -gt 0 -and
-                $status.Version -eq '0.5.1' -and $status.State -in @('Waiting', 'Connected')) { $healthy = $true; break }
+                $status.Version -eq '0.5.2' -and $status.State -in @('Waiting', 'Connected')) { $healthy = $true; break }
         } catch { }
         Start-Sleep -Milliseconds 250
     }
