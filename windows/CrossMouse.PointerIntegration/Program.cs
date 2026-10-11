@@ -54,7 +54,10 @@ internal static class Program
         using var process = Process.Start(start) ?? throw new IOException("Could not start isolated Chrome fixture.");
         Native.GetCursorPos(out var originalPointer);
         int active = 0;
-        using var presenter = new PointerPresenter(() => Volatile.Read(ref active) != 0, simulateHiddenNativePointerForTest: true);
+        // Exercise the production constructor: forcing the fallback masked the
+        // decision that hides our surface when Windows merely reports SHOWING.
+        // The remote session must own a painted pointer across glyph changes.
+        using var presenter = new PointerPresenter(() => Volatile.Read(ref active) != 0);
         nint dialog = 0;
         try
         {
@@ -79,7 +82,7 @@ internal static class Program
             foreach (string theme in new[] { "light", "dark" })
             {
                 await cdp.EvaluateAsync($"document.body.style.background='{(theme == "light" ? "white" : "#191919")}'", token);
-                foreach (string element in new[] { "hand", "text", "resize", "hidden" })
+                foreach (string element in new[] { "hand", "text", "resize", "hidden", "text", "hand" })
                 {
                     Point point = await ElementPoint(cdp, element, token);
                     Require(Native.SetCursorPos(point.X, point.Y) && Native.WakePointerAt(point.X, point.Y), "Chrome move rejected.");
@@ -94,7 +97,7 @@ internal static class Program
             Require(Native.MouseButton(0, true) && Native.MouseButton(0, false), "Chrome click rejected.");
             await Task.Delay(100, token);
             Require((await cdp.EvaluateAsync("window.clickCount||0", token)).GetInt32() == 1, "Pointer overlay intercepted Chrome click.");
-            Console.WriteLine("PASS real Chrome light/dark hand, I-beam, resize and transparent-native fallback; click-through verified");
+            Console.WriteLine("PASS production default pointer across Chrome hand/text/resize/hidden/text/hand; no forced fallback; click-through verified");
 
             Point folder = await ElementPoint(cdp, "folder", token);
             Native.SetCursorPos(folder.X, folder.Y); Native.WakePointerAt(folder.X, folder.Y);
