@@ -97,7 +97,10 @@ function Assert-TrustedRoot([string]$path) {
     $acl = Get-Acl -LiteralPath $path
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($owner -notin @('S-1-5-18','S-1-5-32-544')) { throw "Refusing a service directory owned by an untrusted principal: $path" }
-    $write = [Security.AccessControl.FileSystemRights]'Write,Modify,Delete,ChangePermissions,TakeOwnership'
+    # Modify is a composite that also contains Read/Execute bits. Testing it
+    # with -band incorrectly rejects our own Users:ReadAndExecute ACL on update.
+    # Check only rights that can actually mutate/delete/retake this directory.
+    $write = [Security.AccessControl.FileSystemRights]'Write,Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
     foreach ($entry in $acl.Access) {
         $sid = $entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
         if ($entry.AccessControlType -eq 'Allow' -and $sid -notin @('S-1-5-18','S-1-5-32-544') -and
