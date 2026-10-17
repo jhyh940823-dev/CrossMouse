@@ -79,3 +79,35 @@ keyboard sequence has been observed or that arbitrary hardware remapping is fixe
 - Public SDK: IOKit/hidsystem/IOLLEvent.h device modifier masks
 - Microsoft: SendInput does not reset existing keyboard state
   (https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput).
+
+## Recorded final validation — 2026-10-17
+
+Runtime commit: `3cfdc09b08b66e2646043c597bb78e654cfcf4f9`.
+Full local Swift suite: 78 tests passed, including 18 new modifier/acquisition
+tests. Signed release compilation and Mac login-launch classification passed.
+The Windows GUI cross-build had zero warnings/errors.
+
+Final CI run `38995939526` completed successfully for both macOS and Windows.
+The Windows log reports 12 encrypted focus/paste/leave cycles, native modifier
+release checks, stale-logo-key rejection, Unicode clipboard transfer and real
+Ctrl+V into its owned native text box. Existing cursor stacking, Chrome/folder
+picker, native X, service lifecycle and upgrade rollback checks passed too.
+The first intermediate run `38995469306` failed the unchanged Chrome CDP helper
+with `KeyNotFoundException`; its new clipboard-cycle checks passed. That failure
+was not hidden by disabling assertions; the final source run is recorded above.
+
+The final signed Mac v0.5.4 was installed at the existing canonical app path.
+The v0.5.3 app and preferences were backed up before graceful replacement.
+The paired secret and all inspected saved settings were unchanged. The new
+process stayed running and authenticated with the existing Windows v0.5.2
+service at 192.168.219.108. The local UI showed input capture installed, keyboard
+and mouse destination Mac, speed 37%, clipboard sharing enabled and the existing
+registered login item. A screenshot of the CrossMouse control window alone was
+visually inspected: the new input-destination label fits without clipping.
+
+Windows was not reinstalled. No real user key sequence or clipboard text was
+captured or posted as a diagnostic. The source/native CI regressions and live
+installation/connection are verified; the user's particular intermittent
+physical shortcut sequence has not been reproduced on their live PC after the
+update. No claim is made that every possible shortcut/keyboard hardware issue
+has been eliminated.
