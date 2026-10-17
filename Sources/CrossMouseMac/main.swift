@@ -78,7 +78,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         set { rememberDisplayInput(newValue ? .windowsHDMI : .macDVI) }
     }
     private var remoteActive = false
-    private var pressedModifiers = Set<Int>()
+    private var remoteModifiers = RemoteModifierState()
+    private var keyboardHandoff = KeyboardHandoffGuard()
     private var statusItem: NSStatusItem!
     private var readyItem: NSMenuItem!
     private var statusLine: NSMenuItem!
@@ -590,6 +591,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private func beginWindowsFocus(switchDisplay: Bool, fractionY: Double = 0.5) -> Bool {
         guard !ddcBusy, !requestedMacDisplay, !remoteActive,
               connected, connectionWanted, receiverResponsive else { return false }
+        guard canAcquireKeyboard() else {
+            hotCornerGate.reset()
+            monitorStatus = "누르고 있는 키/버튼을 놓은 뒤 Windows로 이동해 주세요. Mac에서 시작한 단축키는 넘기지 않습니다."
+            updateMenu(); return false
+        }
         guard peerCapability == "handoff-2" else {
             monitorStatus = "Windows \(peerVersion): 화면·커서 준비 확인 기능이 없습니다. 수동 공유는 그대로 사용할 수 있습니다."
             updateMenu(); return false
@@ -663,7 +669,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         pendingClipboard = nil
         if message.reason == "ok" {
             textClipboard.acknowledge(changeCount: pending.changeCount)
-            clipboardStatus = "텍스트 공유 완료 · Windows에서 Ctrl+V로 붙여넣으세요."
+            clipboardStatus = "텍스트 공유 완료 · 공유 키보드에서 ⌘V로 붙여넣기 (Windows Ctrl+V)"
         } else {
             // Status is selected locally, not echoed from peer-supplied text.
             clipboardStatus = message.reason == "local-changed"
@@ -728,7 +734,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 // DDC work is serialized. Its physical result remains true if
                 // the user cancelled input ownership while the write ran.
                 if case .success = result { self.rememberDisplayInput(.windowsHDMI) }
-                guard self.automaticHandoff.id == id else { return }
+                guard self.automaticHandoff.id == id else { self.updateMenu(); return }
                 switch result {
                 case .success:
                     guard self.automaticHandoff.switched(id, now: ProcessInfo.processInfo.systemUptime) else { return }
@@ -742,12 +748,21 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 self.updateMenu()
             }
         case "entered":
+            guard automaticHandoff.phase == .acquiring(id) else { return }
+            // A preparation/clipboard wait can outlive a new local shortcut.
+            // Never split that shortcut's down and up between two computers.
+            guard canAcquireKeyboard() else {
+                cancelAutomaticEntry()
+                monitorStatus = "Mac 키 입력 중이므로 전환을 취소했습니다. 키를 놓고 다시 이동해 주세요."
+                updateMenu(); return
+            }
             guard automaticHandoff.acquired(id, visible: message.pointerVisible == true, now: now) else { return }
             let anchor = CGPoint(x: displayBounds.maxX - 5, y: displayBounds.midY)
             guard CGWarpMouseCursorPosition(anchor) == .success else {
                 cancelAutomaticEntry(); monitorStatus = "Mac 커서 제어를 확보하지 못했습니다."; updateMenu(); return
             }
             remoteCursorAnchor = anchor
+            remoteModifiers.reset(flags: CGEventSource.flagsState(.combinedSessionState))
             remoteActive = true
             pointerMotion.reset()
             physicalPointer.beginCapture()
@@ -771,6 +786,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func requestMacDisplay() {
+        keyboardHandoff.invalidate()
         // This explicit action is the ONLY automatic DVI command. It works
         // from either computer's input focus and even if the peer is offline.
         if case .switchingToMac = automaticHandoff.phase { return }
@@ -914,7 +930,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             autoVerified: verifiedHDMI && verifiedDVI, autoEnabled: autoInputSwitch,
             monitorBusy: ddcBusy, monitorStatus: monitorStatus,
             displayKnown: automaticHandoff.hasCurrentDisplaySelection,
-            connectionDetail: connectionStatus
+            connectionDetail: connectionStatus,
+            inputOnWindows: remoteActive && connected && receiverResponsive && windowsReady
         )
         controlWindow?.renderPointerSpeed(pointerMotion.percent)
         controlWindow?.renderClipboard(enabled: clipboardEnabled, status: clipboardStatus)
@@ -975,6 +992,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func forceReturn() {
+        keyboardHandoff.invalidate()
         requestedMacDisplay = false
         cancelAutomaticEntry()
         network.send(CrossMouseMessage(type: "leave"))
@@ -982,13 +1000,14 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func reclaimMac() {
+        keyboardHandoff.invalidate()
         physicalPointer.endCapture()
         pointerMotion.reset()
         awaitingEnterAt = nil
+        remoteModifiers.reset()
         guard remoteActive else { return }
         remoteActive = false
         remoteCursorAnchor = nil
-        pressedModifiers.removeAll()
         let point = CGPoint(
             x: displayBounds.maxX - min(90, displayBounds.width / 4),
             y: displayBounds.midY
@@ -1007,6 +1026,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        // F8 gets its existing explicit-return handling BEFORE a local chord
+        // can cancel pending acquisition. In-flight HDMI must still be followed
+        // by the requested DVI command, not turn this F8 into a media shortcut.
         if let shortcutEvent = DisplayReturnEvent(type: type, event: event) {
             let decision = shortcutEvent.apply(
                 to: &displayReturnShortcut,
@@ -1014,6 +1036,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             )
             switch decision {
             case .requestDVI:
+                keyboardHandoff.invalidate()
                 traceTransfer("DVI-key-\(shortcutEvent.source.rawValue)", id: automaticHandoff.id)
                 lastShortcutStatus = "F8 수신됨"
                 // Never run DDC, window layout or ownership cleanup inside an
@@ -1039,6 +1062,23 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             }
         }
 
+        if !remoteActive {
+            let newLocalInteraction = keyboardHandoff.observeLocal(type)
+            let retreatFromSeam = type == .mouseMoved
+                && (focusRequestQueued || !automaticHandoff.switchesDisplayOnEntry)
+                && event.getIntegerValueField(.mouseEventDeltaX) < 0
+                && event.location.x < displayBounds.maxX - 12
+            if retreatFromSeam { keyboardHandoff.invalidate() }
+            if (newLocalInteraction || retreatFromSeam),
+               KeyboardHandoffGuard.awaitsWindowsInput(automaticHandoff.phase) {
+                // Cancels the correlated lease, not the chosen HDMI video input.
+                // The complete new chord/click stays local, including its UP.
+                cancelAutomaticEntry()
+                monitorStatus = "Mac 입력을 유지했습니다. Windows로 이동하려면 다시 오른쪽 끝으로 이동하세요."
+                DispatchQueue.main.async { [weak self] in self?.updateMenu() }
+            }
+        }
+
         guard connectionWanted, connected, receiverResponsive, windowsReady else {
             if !remoteActive { keepLocalCursorOnSamsung(event, type: type) }
             return Unmanaged.passUnretained(event)
@@ -1058,9 +1098,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 if peerCapability == "handoff-2" {
                     if !focusRequestQueued {
                         focusRequestQueued = true
+                        let intent = keyboardHandoff.revision
                         DispatchQueue.main.async { [weak self] in
                             guard let self else { return }
                             self.focusRequestQueued = false
+                            guard self.keyboardHandoff.isCurrent(intent) else { return }
                             _ = self.beginWindowsFocus(switchDisplay: false, fractionY: ratio)
                         }
                     }
@@ -1072,6 +1114,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 // Keep the Mac pointer parked while forwarding relative deltas.
                 // Unlike global cursor disassociation, this cannot leave a
                 // user's pointer permanently disconnected if the app crashes.
+                guard canAcquireKeyboard() else { return Unmanaged.passUnretained(event) }
                 let anchor = CGPoint(
                     x: displayBounds.maxX - 5,
                     y: min(max(event.location.y, displayBounds.minY + 2), displayBounds.maxY - 2)
@@ -1081,6 +1124,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                     updateMenu()
                     return Unmanaged.passUnretained(event)
                 }
+                remoteModifiers.reset(flags: event.flags)
                 remoteActive = true
                 pointerMotion.reset()
                 awaitingEnterAt = ProcessInfo.processInfo.systemUptime
@@ -1094,6 +1138,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
 
+        // Use the event's actual state, not a local toggle. This happens before
+        // a letter/click is sent, keeping the entire shortcut correctly ordered.
+        for key in remoteModifiers.update(flags: event.flags, sideKeyState: {
+            CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0))
+        }) { sendInput(key) }
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let dx = Int(event.getIntegerValueField(.mouseEventDeltaX))
@@ -1127,14 +1176,19 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         case .keyDown, .keyUp:
             sendInput(CrossMouseMessage(type: "key", down: type == .keyDown, code: keyCode))
         case .flagsChanged:
-            let down = !pressedModifiers.contains(keyCode)
-            if down { pressedModifiers.insert(keyCode) }
-            else { pressedModifiers.remove(keyCode) }
-            sendInput(CrossMouseMessage(type: "key", down: down, code: keyCode))
+            break // complete modifier delta was sent above
         default:
             break
         }
         return nil // Suppress all captured input while Windows has control.
+    }
+
+    private func canAcquireKeyboard() -> Bool {
+        let buttonsDown = (0..<5).contains { index in
+            CGEventSource.buttonState(.combinedSessionState, button: CGMouseButton(rawValue: UInt32(index))!)
+        }
+        return KeyboardHandoffGuard.canAcquire(flags: CGEventSource.flagsState(.combinedSessionState),
+            buttonsDown: buttonsDown, keyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) })
     }
 
     private func keepLocalCursorOnSamsung(_ event: CGEvent, type: CGEventType) {

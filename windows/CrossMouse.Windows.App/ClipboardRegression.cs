@@ -72,6 +72,36 @@ internal static class ClipboardRegression
                 await pasted.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
                 await peer.SendAsync(new MouseMessage { Type = "leave", TransferId = id }, token);
                 Console.WriteLine("PASS encrypted clipboard chunks, Unicode/long code, real Ctrl+V, local-copy conflict, busy retry, history opt-out");
+                // The wire mapping is intentionally unchanged: Mac Command
+                // is Ctrl. Verify repeated focus leases do not leave Ctrl/Win
+                // down or turn the next paste into a Windows-logo shortcut.
+                for (int cycle = 0; cycle < 12; cycle++)
+                {
+                    await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
+                    await peer.ExpectAsync("pong", token);
+                    box.Clear(); window.Activate(); box.Focus();
+                    string nextId = Guid.NewGuid().ToString();
+                    await peer.SendAsync(new MouseMessage { Type = "prepare", TransferId = nextId }, token);
+                    await peer.ExpectAsync("prepared", token);
+                    await peer.SendAsync(new MouseMessage { Type = "enter", TransferId = nextId, CenterCursor = true }, token);
+                    await peer.ExpectAsync("entered", token);
+                    // A delayed key from the previous owner has no authority.
+                    await peer.SendAsync(new MouseMessage { Type = "key", TransferId = id, Code = 59, Down = true }, token);
+                    await peer.SendAsync(new MouseMessage { Type = "key", TransferId = nextId, Code = 55, Down = true }, token);
+                    await peer.SendAsync(new MouseMessage { Type = "key", TransferId = nextId, Code = 9, Down = true }, token);
+                    await peer.SendAsync(new MouseMessage { Type = "key", TransferId = nextId, Code = 9, Down = false }, token);
+                    await peer.SendAsync(new MouseMessage { Type = "key", TransferId = nextId, Code = 55, Down = false }, token);
+                    await peer.SendAsync(new MouseMessage { Type = "ping" }, token);
+                    await peer.ExpectAsync("pong", token);
+                    var deadline = Stopwatch.StartNew();
+                    while ((box.Text != Normalize(text) || !ModifiersReleased()) && deadline.ElapsedMilliseconds < 1500)
+                        await Task.Delay(10, token);
+                    Require(box.Text == Normalize(text), $"Repeated paste failed at focus lease {cycle}.");
+                    Require(ModifiersReleased(), $"A modifier remained down after paste at focus lease {cycle}.");
+                    await peer.SendAsync(new MouseMessage { Type = "leave", TransferId = nextId }, token);
+                    id = nextId;
+                }
+                Console.WriteLine("PASS 12 encrypted focus/paste/leave cycles; stale Windows-logo input rejected and native Ctrl/Alt/Shift/Win state released");
                 result = 0;
             }
             catch (Exception error) { Console.Error.WriteLine("FAIL clipboard: " + error); }
@@ -145,6 +175,9 @@ internal static class ClipboardRegression
         finally { CloseClipboard(); }
     }
     private static void Require(bool condition, string failure) { if (!condition) throw new Exception(failure); }
+    private static bool ModifiersReleased() => new[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C }
+        .All(key => (GetAsyncKeyState(key) & 0x8000) == 0);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] private static extern bool OpenClipboard(nint owner);
     [DllImport("user32.dll")] private static extern bool CloseClipboard();
     [DllImport("user32.dll")] private static extern nint GetClipboardData(uint format);

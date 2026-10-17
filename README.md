@@ -1,5 +1,15 @@
 # CrossMouse
 
+## Mac v0.5.4 — 수정키 상태와 입력 대상
+
+Mac에서 누른 수정키를 Windows 진입 뒤 놓았을 때 반대로 DOWN을 만들던
+이벤트 토글을 실제 상태 기반으로 교체했습니다. 전환 대기 중 새로 시작한
+Mac 단축키/클릭이 늦은 Windows 응답에 빼앗기지 않도록 입력 의도를 확인합니다.
+공유 키보드의 기존 고정 매핑(Command→Ctrl, Control→Win, Option→Alt)은 유지하고
+현재 입력 대상과 공유 키보드 붙여넣기(⌘V)를 창에 명시합니다.
+Windows 재설치 없이 기존 v0.5.2 수신기를 사용합니다.
+재현·검증 범위는 [MODIFIER-STATE-V054.md](docs/MODIFIER-STATE-V054.md)에 기록합니다.
+
 ## Mac v0.5.3 — IP가 바뀐 페어링 PC 자동 재연결
 
 저장된 Windows 주소가 응답하지 않을 때 같은 로컬 IPv4 서브넷에서 기존

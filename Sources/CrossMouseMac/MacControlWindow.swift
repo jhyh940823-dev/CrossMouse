@@ -202,7 +202,7 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
                 autoVerified: Bool = false,
                 autoEnabled: Bool = false, monitorBusy: Bool = false,
                 monitorStatus: String = "", displayKnown: Bool = true,
-                connectionDetail: String = "") {
+                connectionDetail: String = "", inputOnWindows: Bool = false) {
         macButton.state = displayKnown && !windowsMode ? .on : .off
         windowsButton.state = displayKnown && windowsMode ? .on : .off
         statusLabel.stringValue = !connecting ? "Windows 연결 중지됨" :
@@ -217,6 +217,9 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
                 : "안전 대기: Windows 앱이 응답할 때까지 마우스 전환이 차단됩니다.")
             : "Mac 듀얼 화면: 삼성에서 필립스로 커서가 정상 이동합니다."
         diagnosticsLabel.stringValue = captureStatus
+        modeDescription.stringValue += inputOnWindows
+            ? "\n현재 키보드·마우스 대상: Windows · 공유 키보드 ⌘→Ctrl / Control→Win / Option→Alt"
+            : "\n현재 키보드·마우스 대상: Mac · Mac 단축키 그대로 사용"
         ddcTestButton.isEnabled = !monitorBusy
         ddcReturnButton.isEnabled = !monitorBusy
         autoSwitchCheck.isEnabled = autoVerified && !monitorBusy
