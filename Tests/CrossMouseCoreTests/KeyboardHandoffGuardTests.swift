@@ -3,6 +3,13 @@ import XCTest
 @testable import CrossMouseCore
 
 final class KeyboardHandoffGuardTests: XCTestCase {
+    func testAcquisitionUsesHardwareStateNotAnInterceptedSessionKey() {
+        XCTAssertEqual(KeyboardHandoffGuard.acquisitionSource, .hidSystemState)
+        // Synthetic session table says V is down after interception, while
+        // physical hardware has released it. The acquisition adapter uses HID.
+        XCTAssertTrue(KeyboardHandoffGuard.canAcquire(flags: [], buttonsDown: false, keyDown: { _ in false }))
+        XCTAssertFalse(KeyboardHandoffGuard.canAcquire(flags: [], buttonsDown: false, keyDown: { $0 == 9 }))
+    }
     func testMomentaryKeysOrButtonsBlockAcquisitionButCapsAndFnDoNot() {
         for flag: CGEventFlags in [.maskControl, .maskCommand, .maskAlternate, .maskShift] {
             XCTAssertFalse(KeyboardHandoffGuard.canAcquire(flags: flag, buttonsDown: false, keyDown: { _ in false }))

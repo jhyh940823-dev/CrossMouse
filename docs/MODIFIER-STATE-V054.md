@@ -38,6 +38,14 @@ from the Samsung seam also cancels pending input entry. Late ready messages
 cannot acquire that cancelled lease. Typing does not cancel an explicit DVI
 operation or an already-acquired Windows lease. Display selection is preserved.
 
+The acquisition state source is HID hardware, not the combined session table.
+A read-only live check found the hardware table clear while the session table
+still had one ordinary key down (no key identity was printed). Using that
+session table would have incorrectly blocked entry. Modifier snapshots still
+come from each actual event; hardware-side lookup is only the fallback for
+missing left/right bits. Aggregate-only synthetic/remapped sources without a
+physical side keep a deterministic logical-left representation.
+
 The Mac window explicitly labels the current keyboard/mouse destination and
 the existing mapping. Shared-keyboard paste instructions now say Command+V,
 which the receiver translates to Ctrl+V. The fixed mapping itself is NOT changed:

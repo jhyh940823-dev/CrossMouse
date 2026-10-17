@@ -61,7 +61,8 @@ final class RemoteModifierStateTests: XCTestCase {
         XCTAssertEqual(state.update(flags: .maskControl, sideKeyState: { $0 == 62 }), [key(62, true)])
         XCTAssertEqual(state.update(flags: .maskControl, sideKeyState: { $0 == 59 }),
                        [key(62, false), key(59, true)])
-        XCTAssertEqual(state.update(flags: .maskControl, sideKeyState: { _ in false }), [key(59, false)])
+        XCTAssertEqual(state.update(flags: .maskControl, sideKeyState: { _ in false }), [])
+        XCTAssertEqual(state.update(flags: []), [key(59, false)])
         // Aggregate-only synthetic source without an OS side table has a
         // deterministic logical-left representation, never an alternating key.
         XCTAssertEqual(state.update(flags: .maskCommand), [key(55, true)])

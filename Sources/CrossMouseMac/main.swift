@@ -762,7 +762,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 cancelAutomaticEntry(); monitorStatus = "Mac 커서 제어를 확보하지 못했습니다."; updateMenu(); return
             }
             remoteCursorAnchor = anchor
-            remoteModifiers.reset(flags: CGEventSource.flagsState(.combinedSessionState))
+            remoteModifiers.reset(flags: CGEventSource.flagsState(.hidSystemState))
             remoteActive = true
             pointerMotion.reset()
             physicalPointer.beginCapture()
@@ -1141,7 +1141,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
         // Use the event's actual state, not a local toggle. This happens before
         // a letter/click is sent, keeping the entire shortcut correctly ordered.
         for key in remoteModifiers.update(flags: event.flags, sideKeyState: {
-            CGEventSource.keyState(.combinedSessionState, key: CGKeyCode($0))
+            CGEventSource.keyState(.hidSystemState, key: CGKeyCode($0))
         }) { sendInput(key) }
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
@@ -1188,11 +1188,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func canAcquireKeyboard() -> Bool {
+        let source = KeyboardHandoffGuard.acquisitionSource
         let buttonsDown = (0..<5).contains { index in
-            CGEventSource.buttonState(.combinedSessionState, button: CGMouseButton(rawValue: UInt32(index))!)
+            CGEventSource.buttonState(source, button: CGMouseButton(rawValue: UInt32(index))!)
         }
-        return KeyboardHandoffGuard.canAcquire(flags: CGEventSource.flagsState(.combinedSessionState),
-            buttonsDown: buttonsDown, keyDown: { CGEventSource.keyState(.combinedSessionState, key: $0) })
+        return KeyboardHandoffGuard.canAcquire(flags: CGEventSource.flagsState(source),
+            buttonsDown: buttonsDown, keyDown: { CGEventSource.keyState(source, key: $0) })
     }
 
     private func keepLocalCursorOnSamsung(_ event: CGEvent, type: CGEventType) {

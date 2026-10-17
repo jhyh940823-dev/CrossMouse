@@ -59,6 +59,9 @@ public struct RemoteModifierState {
             } else if let sideKeyState {
                 if sideKeyState(left) { held.insert(left) }
                 if sideKeyState(right) { held.insert(right) }
+                // Aggregate-only synthetic/remapped sources may have no
+                // corresponding physical side. Preserve their logical state.
+                if !held.contains(left) && !held.contains(right) { held.insert(left) }
             } else { held.insert(left) }
         }
         return held
