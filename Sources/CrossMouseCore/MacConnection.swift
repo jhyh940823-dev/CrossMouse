@@ -1,47 +1,96 @@
-import CrossMouseCore
 import CryptoKit
 import Foundation
 import Network
 
+public struct PeerRecoveryTiming: Sendable {
+    let directTimeout: TimeInterval
+    let candidateTimeout: TimeInterval
+    let retryDelay: TimeInterval
+    let discoveryCooldown: TimeInterval
+    let silenceLimit: TimeInterval
+    public static let standard = PeerRecoveryTiming(directTimeout: 7, candidateTimeout: 2,
+        retryDelay: 2, discoveryCooldown: 30, silenceLimit: 7)
+}
+
 /// All connection state and cryptographic counters live on one serial queue.
 /// In particular, an event-tap callback never waits for the network.
-final class MacConnection: @unchecked Sendable {
-    private let host: String
+public final class MacConnection: @unchecked Sendable {
+    private var host: String
     private let port: UInt16
     private let secret: Data
     private let onConnected: @Sendable (Bool) -> Void
     private let onMessage: @Sendable (CrossMouseMessage) -> Void
+    private let onStatus: @Sendable (String) -> Void
+    private let saveHost: @Sendable (String) throws -> Void
+    private let candidateProvider: (@Sendable () -> [PeerEndpoint])?
+    private let timing: PeerRecoveryTiming
     private let queue = DispatchQueue(label: "CrossMouse.connection", qos: .userInteractive)
     private var connection: NWConnection?
     private var buffer = FramedByteBuffer()
-    private var clientNonce = Data()
     private var sessionKey: Data?
     private var sendSequence: UInt64 = 0
     private var receiveSequence: UInt64 = 0
-    private var stopped = false
+    private var stopped = true
+    private var dialer: PairedPeerDialer?
+    private var retry: DispatchWorkItem?
+    private var recoveryEpoch: UInt64 = 0
+    private var lastDiscoveryEnded: TimeInterval?
+    private var discoveryAttempted = false
+    private var pathMonitor: NWPathMonitor?
+    private var healthTimer: DispatchSourceTimer?
+    private var lastResponse: TimeInterval?
+    private var hostNeedsSave = false
     private var moveTimer: DispatchSourceTimer?
     private var pendingMoveX = 0
     private var pendingMoveY = 0
     private var pendingTransferId: String?
     private var clipboardUpload: String?
 
-    init(
+    public init(
         host: String,
         port: UInt16,
         secret: Data,
         onConnected: @escaping @Sendable (Bool) -> Void,
-        onMessage: @escaping @Sendable (CrossMouseMessage) -> Void
+        onMessage: @escaping @Sendable (CrossMouseMessage) -> Void,
+        onStatus: @escaping @Sendable (String) -> Void = { _ in },
+        saveHost: @escaping @Sendable (String) throws -> Void = { _ in },
+        candidateProvider: (@Sendable () -> [PeerEndpoint])? = nil,
+        timing: PeerRecoveryTiming = .standard
     ) {
         self.host = host
         self.port = port
         self.secret = secret
         self.onConnected = onConnected
         self.onMessage = onMessage
+        self.onStatus = onStatus; self.saveHost = saveHost
+        self.candidateProvider = candidateProvider; self.timing = timing
     }
 
-    func start() {
+    public func start() {
         queue.async { [self] in
+            guard stopped else { return }
             self.stopped = false
+            let monitor = NWPathMonitor()
+            pathMonitor = monitor
+            monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+                guard let self, let monitor, self.pathMonitor === monitor, !self.stopped else { return }
+                if path.status != .satisfied {
+                    self.disconnect()
+                    self.onStatus("네트워크 연결 없음 · 연결되면 페어링된 PC를 다시 찾습니다.")
+                } else if self.connection == nil && self.dialer == nil {
+                    self.retry?.cancel(); self.retry = nil
+                    self.connect()
+                }
+            }
+            monitor.start(queue: queue)
+            let health = DispatchSource.makeTimerSource(queue: queue)
+            health.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+            health.setEventHandler { [weak self] in
+                guard let self, let last = self.lastResponse, self.sessionKey != nil,
+                      ProcessInfo.processInfo.systemUptime - last > self.timing.silenceLimit else { return }
+                self.disconnect()
+            }
+            healthTimer = health; health.resume()
             if self.moveTimer == nil {
                 // Send at most one relative mouse movement per 8ms (~125 Hz).
                 // Coalesce high-Hz mouse events instead of letting hundreds of
@@ -57,16 +106,18 @@ final class MacConnection: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    public func stop() {
         queue.async {
             self.stopped = true
+            self.pathMonitor?.cancel(); self.pathMonitor = nil
+            self.healthTimer?.cancel(); self.healthTimer = nil
             self.moveTimer?.cancel()
             self.moveTimer = nil
             self.disconnect()
         }
     }
 
-    func send(_ message: CrossMouseMessage) {
+    public func send(_ message: CrossMouseMessage) {
         queue.async { [self] in
             guard !self.stopped else { return }
             guard self.sessionKey != nil else { return }
@@ -86,7 +137,7 @@ final class MacConnection: @unchecked Sendable {
 
     /// Bounded, completion-paced upload. Input/heartbeat frames may interleave,
     /// and cancelling/reconnecting drops the remaining old clipboard frames.
-    func sendClipboard(_ frames: [CrossMouseMessage], id: String) {
+    public func sendClipboard(_ frames: [CrossMouseMessage], id: String) {
         queue.async { [self] in
             guard !stopped, let socket = connection, sessionKey != nil else { return }
             clipboardUpload = id
@@ -95,7 +146,7 @@ final class MacConnection: @unchecked Sendable {
         }
     }
 
-    func cancelClipboard(_ id: String) {
+    public func cancelClipboard(_ id: String) {
         queue.async { [self] in
             if clipboardUpload == id { clipboardUpload = nil }
         }
@@ -145,57 +196,84 @@ final class MacConnection: @unchecked Sendable {
     }
 
     private func connect() {
-        guard !stopped, connection == nil, let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            return
-        }
-        buffer = FramedByteBuffer()
-        clientNonce = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
-        sessionKey = nil
-        sendSequence = 0
-        receiveSequence = 0
-        pendingMoveX = 0
-        pendingMoveY = 0
-        pendingTransferId = nil
-        clipboardUpload = nil
-        let tcp = NWProtocolTCP.Options()
-        tcp.noDelay = true
-        let socket = NWConnection(
-            host: NWEndpoint.Host(host), port: endpointPort,
-            using: NWParameters(tls: nil, tcp: tcp)
-        )
-        connection = socket
+        guard !stopped, connection == nil, dialer == nil, port > 0 else { return }
+        retry?.cancel(); retry = nil
+        recoveryEpoch &+= 1
+        let epoch = recoveryEpoch
+        discoveryAttempted = false
+        let next = PairedPeerDialer(queue: queue, secret: secret,
+            timeout: timing.candidateTimeout, directTimeout: timing.directTimeout,
+            onProgress: { [weak self] progress in
+                guard let self, !self.stopped, self.recoveryEpoch == epoch else { return }
+                switch progress {
+                case .connecting(let address): self.onStatus("\(address) · 저장된 Windows 주소에 연결 중…")
+                case .searching:
+                    self.onStatus("기존 주소 연결 실패 · 같은 네트워크에서 페어링된 PC 자동 검색 중…")
+                case .exhausted:
+                    self.onStatus("Windows 응답 없음 · 주소 자동 검색/재연결을 대기 중입니다.")
+                }
+            }, completion: { [weak self] peer in
+                guard let self, !self.stopped, self.recoveryEpoch == epoch else {
+                    peer?.connection.cancel(); return
+                }
+                self.dialer = nil
+                if self.discoveryAttempted { self.lastDiscoveryEnded = ProcessInfo.processInfo.systemUptime }
+                if let peer { self.adopt(peer) }
+                else { self.scheduleRetry() }
+            })
+        dialer = next
+        next.start(previous: PeerEndpoint(host: host, port: port), candidates: { [weak self] in
+            guard let self, !self.stopped, self.recoveryEpoch == epoch else { return [] }
+            let now = ProcessInfo.processInfo.systemUptime
+            if let ended = self.lastDiscoveryEnded, now - ended < self.timing.discoveryCooldown { return [] }
+            self.discoveryAttempted = true
+            return self.candidateProvider?() ?? LANPeerCandidates.snapshot(previous: self.host,
+                port: self.port, path: self.pathMonitor?.currentPath)
+        })
+    }
+
+    private func adopt(_ peer: AuthenticatedPeer) {
+        let socket = peer.connection
+        connection = socket; sessionKey = peer.sessionKey
+        buffer = peer.remainingBytes
+        sendSequence = peer.sendSequence; receiveSequence = peer.receiveSequence
+        lastResponse = ProcessInfo.processInfo.systemUptime
+        pendingMoveX = 0; pendingMoveY = 0; pendingTransferId = nil; clipboardUpload = nil
         socket.stateUpdateHandler = { [weak self, weak socket] state in
             guard let self, let socket, self.connection === socket else { return }
             switch state {
-            case .ready:
-                do {
-                    let hello = try CrossMouseWire.clientHello(
-                        secret: self.secret, clientNonce: self.clientNonce
-                    )
-                    socket.send(content: hello, completion: .contentProcessed { [weak self, weak socket] error in
-                        if error != nil, let socket { self?.disconnect(ifCurrent: socket) }
-                    })
-                    self.receive(socket)
-                } catch {
-                    self.disconnect(ifCurrent: socket)
-                }
-            case .failed(_), .cancelled, .waiting(_):
-                // NWConnection may stay in .waiting forever when the Windows
-                // receiver is restarted. Retry with a fresh TCP connection.
-                self.disconnect(ifCurrent: socket)
-            default:
-                break
+            case .failed, .waiting, .cancelled: self.disconnect(ifCurrent: socket)
+            default: break
             }
         }
-        socket.start(queue: queue)
-        // A socket can be TCP-ready but never finish pairing (e.g. a stale
-        // listener or a server waiting for another client). Don't remain
-        // "Windows 연결 대기 중" indefinitely: retry the full handshake.
-        queue.asyncAfter(deadline: .now() + .seconds(7)) { [weak self, weak socket] in
-            guard let self, let socket, self.connection === socket,
-                  self.sessionKey == nil, !self.stopped else { return }
-            self.disconnect(ifCurrent: socket)
+        // The discovered candidate has already verified the original pairing
+        // key AND encrypted receiver response. Only now may it replace a hint.
+        let changed = host != peer.endpoint.host
+        host = peer.endpoint.host
+        hostNeedsSave = hostNeedsSave || changed
+        var saved = true
+        if hostNeedsSave {
+            do { try saveHost(host); hostNeedsSave = false } catch { saved = false }
         }
+        onConnected(true)
+        onMessage(peer.firstPong)
+        onStatus(saved ? "\(host) · " + (changed ? "페어링된 PC를 자동으로 다시 찾았습니다." : "페어링 인증 연결됨")
+                       : "\(host) · 연결됨 · 새 주소 저장 실패")
+        do { try processBuffer() }
+        catch { disconnect(ifCurrent: socket); return }
+        receive(socket)
+    }
+
+    private func scheduleRetry() {
+        guard !stopped else { return }
+        retry?.cancel()
+        let epoch = recoveryEpoch
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.stopped, self.recoveryEpoch == epoch else { return }
+            self.retry = nil; self.connect()
+        }
+        retry = work
+        queue.asyncAfter(deadline: .now() + timing.retryDelay, execute: work)
     }
 
     private func receive(_ socket: NWConnection) {
@@ -218,17 +296,6 @@ final class MacConnection: @unchecked Sendable {
     }
 
     private func processBuffer() throws {
-        if sessionKey == nil {
-            guard let hello = buffer.take(CrossMouseWire.helloLength) else { return }
-            let serverNonce = try CrossMouseWire.verifyServerHello(
-                hello, secret: secret, clientNonce: clientNonce
-            )
-            sessionKey = try CrossMouseWire.sessionKey(
-                secret: secret, clientNonce: clientNonce, serverNonce: serverNonce
-            )
-            onConnected(true)
-        }
-
         while let ciphertext = try buffer.takeEncryptedFrame() {
             guard let key = sessionKey else { throw CrossMouseError.invalidHandshake }
             let message = try CrossMouseWire.open(
@@ -236,6 +303,7 @@ final class MacConnection: @unchecked Sendable {
                 sequence: receiveSequence, direction: .windowsToMac
             )
             receiveSequence += 1
+            lastResponse = ProcessInfo.processInfo.systemUptime
             onMessage(message)
         }
     }
@@ -243,6 +311,9 @@ final class MacConnection: @unchecked Sendable {
     private func disconnect(ifCurrent socket: NWConnection? = nil) {
         if let socket, connection !== socket { return }
         let wasConnected = sessionKey != nil
+        recoveryEpoch &+= 1
+        retry?.cancel(); retry = nil
+        dialer?.cancel(); dialer = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
@@ -252,10 +323,8 @@ final class MacConnection: @unchecked Sendable {
         pendingMoveY = 0
         pendingTransferId = nil
         clipboardUpload = nil
+        lastResponse = nil
         if wasConnected { onConnected(false) }
-        guard !stopped else { return }
-        queue.asyncAfter(deadline: .now() + .seconds(2)) { [weak self] in
-            self?.connect()
-        }
+        scheduleRetry()
     }
 }

@@ -8,6 +8,7 @@ private struct Options {
     let port: UInt16
     let displayID: CGDirectDisplayID?
     let key: Data
+    let hostPath: String?
 
     static func parse() throws -> Options {
         let arguments = Array(CommandLine.arguments.dropFirst())
@@ -41,7 +42,8 @@ private struct Options {
         let contents = try String(contentsOfFile: keyPath, encoding: .utf8)
         return Options(
             host: host, port: port, displayID: displayID,
-            key: try CrossMouseWire.decodeKey(contents)
+            key: try CrossMouseWire.decodeKey(contents),
+            hostPath: value("--host") == nil ? configDirectory + "/host" : nil
         )
     }
 
@@ -117,6 +119,7 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var pendingClipboard: (transferId: String, id: String, changeCount: Int)?
     private var peerVersion = "확인되지 않음"
     private var peerStatus = ""
+    private var connectionStatus = ""
     private let physicalPointer = MacPhysicalPointer()
     private var launchedInBackground = false
 
@@ -148,6 +151,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated { self?.refreshDisplay() }
         }
 
+        let addressStore = options.hostPath.map {
+            PeerAddressStore(url: URL(fileURLWithPath: $0), expectedHost: options.host)
+        }
         network = MacConnection(
             host: options.host, port: options.port, secret: options.key,
             onConnected: { [weak self] value in
@@ -224,7 +230,13 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                         self.updateMenu()
                     }
                 }
-            }
+            }, onStatus: { [weak self] status in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.connectionStatus = status
+                    self.updateMenu()
+                }
+            }, saveHost: { host in try addressStore?.saveVerifiedHost(host) }
         )
         network.start()
         installEventTap()
@@ -901,7 +913,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             receiverResponsive: receiverResponsive,
             autoVerified: verifiedHDMI && verifiedDVI, autoEnabled: autoInputSwitch,
             monitorBusy: ddcBusy, monitorStatus: monitorStatus,
-            displayKnown: automaticHandoff.hasCurrentDisplaySelection
+            displayKnown: automaticHandoff.hasCurrentDisplaySelection,
+            connectionDetail: connectionStatus
         )
         controlWindow?.renderPointerSpeed(pointerMotion.percent)
         controlWindow?.renderClipboard(enabled: clipboardEnabled, status: clipboardStatus)

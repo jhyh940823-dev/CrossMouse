@@ -201,13 +201,15 @@ final class MacControlWindow: NSWindowController, NSWindowDelegate {
                 captureStatus: String, receiverResponsive: Bool = false,
                 autoVerified: Bool = false,
                 autoEnabled: Bool = false, monitorBusy: Bool = false,
-                monitorStatus: String = "", displayKnown: Bool = true) {
+                monitorStatus: String = "", displayKnown: Bool = true,
+                connectionDetail: String = "") {
         macButton.state = displayKnown && !windowsMode ? .on : .off
         windowsButton.state = displayKnown && windowsMode ? .on : .off
         statusLabel.stringValue = !connecting ? "Windows 연결 중지됨" :
             connected ? (receiverResponsive ? "Windows 수신기 정상 응답 · 연결됨" :
                 "TCP 연결됨 · Windows 수신기 응답 없음 (Windows 앱 버전 확인)") :
                 "Windows 연결 대기 중…"
+        if !connectionDetail.isEmpty && connecting { statusLabel.stringValue += "\n" + connectionDetail }
         connectionButton.title = connecting ? "연결 중지" : "연결 시작"
         modeDescription.stringValue = !displayKnown ? "영상 입력 확인 중 · 필요하면 F8로 필립스를 Mac 화면으로 돌릴 수 있습니다." : windowsMode
             ? (receiverResponsive
