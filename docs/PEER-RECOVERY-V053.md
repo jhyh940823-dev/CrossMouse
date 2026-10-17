@@ -67,6 +67,41 @@ These fixtures do not by themselves demonstrate a real DHCP lease renewal on
 the user's Windows PC. Live installation and a stale-hint recovery check are
 recorded separately after they are performed.
 
+## Live Mac validation — 2026-10-17
+
+Runtime commit: `d64a6c68c75118e142cb8791f3eb5c88b378a4e3`.
+Mac v0.5.3 was signed with the same existing Apple Development identity and
+installed at the canonical app path after backing up v0.5.2 and its preferences.
+The Windows installation was not touched and still reports v0.5.1 service mode.
+
+The saved hint was deliberately set back to the obsolete .104 address before
+launching v0.5.3. Without a manually supplied new address, the installed app
+found the existing paired .108 Windows receiver, authenticated its encrypted
+response, saved .108 and displayed the automatic-recovery status. The complete
+stale-hint recovery check took 8.51 seconds on this local network. This tests
+real discovery with the user's existing receiver, not an actual DHCP renewal
+or a guaranteed recovery time for every future network condition.
+
+The app was then restarted again with the newly saved .108 hint. The existing
+Windows service authenticated directly; the observed restart check completed
+in 0.50 seconds. The final Mac window reports `192.168.219.108` and an authenticated
+Windows v0.5.1 service. Speed 37%, automatic input switching, text-sharing
+preference and registered login startup remained unchanged. The test did not
+synthesize user input, inspect clipboard content, change the monitor input,
+reset pairing, modify Windows/firewall settings or configure the router.
+
+CI run `38991844744` passed the Mac job (tests, build and startup classification).
+Its first Windows job failed in the unchanged Chrome test helper:
+`Cdp.EvaluateAsync` / `ElementPoint`, `KeyNotFoundException` while reading a CDP
+JSON property. The rest of that job's executed tests, including service and
+clipboard checks, passed. That Windows failure is recorded rather than calling
+the initial complete workflow green; Windows source/installer are unchanged by
+this Mac networking change. One same-source retry also failed the Chrome test
+step; its other executed steps and the Mac job passed. No Windows test was
+disabled, relaxed or modified to hide this result. The full workflow is NOT
+reported as green. The Mac change is supported by its passing suite/build and
+the real stale-hint discovery/restart observations above.
+
 API references:
 - https://developer.apple.com/documentation/network/nwconnection
 - https://developer.apple.com/documentation/network/nwparameters/requiredinterface
