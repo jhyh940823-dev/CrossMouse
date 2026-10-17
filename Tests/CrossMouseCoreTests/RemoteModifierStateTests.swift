@@ -113,4 +113,10 @@ final class RemoteModifierStateTests: XCTestCase {
         XCTAssertEqual(state.update(flags: event.flags), [key(55, false)])
         // No event is posted and neither computer's OS key state is modified.
     }
+    func testAlternateModifierEventTypesHaveOnlyOneForwardingPath() {
+        for code in 54...63 { XCTAssertTrue(RemoteModifierState.handlesKeyCode(code)) }
+        for code in [0, 8, 9, 48, 53, 64, 100, 123] {
+            XCTAssertFalse(RemoteModifierState.handlesKeyCode(code))
+        }
+    }
 }

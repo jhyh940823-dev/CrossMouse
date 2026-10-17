@@ -38,6 +38,7 @@ public struct RemoteModifierState {
     }
 
     public static let shortcutFlags: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+    public static func handlesKeyCode(_ code: Int) -> Bool { (54...63).contains(code) }
 
     /// Side-specific masks from Apple's public IOLLEvent.h. Aggregate flags are
     /// checked first, so a stale low bit cannot manufacture a held modifier.

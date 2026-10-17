@@ -1174,7 +1174,11 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
                 sendInput(CrossMouseMessage(type: "wheel", vertical: v, horizontal: h))
             }
         case .keyDown, .keyUp:
-            sendInput(CrossMouseMessage(type: "key", down: type == .keyDown, code: keyCode))
+            // Some synthetic sources use keyDown/up even for modifiers. Their
+            // actual state was reconciled above; do not send the same press twice.
+            if !RemoteModifierState.handlesKeyCode(keyCode) {
+                sendInput(CrossMouseMessage(type: "key", down: type == .keyDown, code: keyCode))
+            }
         case .flagsChanged:
             break // complete modifier delta was sent above
         default:
