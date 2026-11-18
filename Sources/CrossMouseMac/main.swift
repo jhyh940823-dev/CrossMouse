@@ -115,8 +115,12 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private var peerCapability: String?
     private var peerClipboardCapability: String?
     private let textClipboard = MacTextClipboard()
+    private let clipboardReader = TextClipboardReadProcess(
+        executableURL: Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+    )
     private var clipboardEnabled = UserDefaults.standard.bool(forKey: "CrossMouse.shareTextClipboard")
     private var clipboardStatus = "Windows로 커서를 넘길 때 새로 복사한 텍스트를 공유합니다."
+    private var pendingClipboardRead: (transferId: String, id: UUID)?
     private var pendingClipboard: (transferId: String, id: String, changeCount: Int)?
     private var peerVersion = "확인되지 않음"
     private var peerStatus = ""
@@ -622,7 +626,38 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             sendEntryAfterClipboard(id)
             return
         }
-        switch textClipboard.read(.general) {
+        // Pasteboard owners may provide text lazily through blocking IPC. The
+        // input tap, HID observer and recovery timers all use this main loop;
+        // no pasteboard operation is allowed to block it, even outside the tap.
+        let readID = UUID()
+        let inputRevision = keyboardHandoff.revision
+        pendingClipboardRead = (id, readID)
+        clipboardStatus = "새로 복사한 텍스트를 확인하는 중…"
+        clipboardReader.read(acknowledgedChange: textClipboard.acknowledgedChange) { [weak self] outcome in
+            guard let self, self.pendingClipboardRead?.id == readID,
+                  self.pendingClipboardRead?.transferId == id,
+                  self.keyboardHandoff.isCurrent(inputRevision),
+                  self.automaticHandoff.phase == .acquiring(id),
+                  self.connected, self.connectionWanted, self.clipboardEnabled else { return }
+            self.pendingClipboardRead = nil
+            switch outcome {
+            case .read(let result):
+                self.sendClipboardResult(result, transferId: id)
+            case .timedOut, .busy, .failed:
+                // A slow/failed clipboard must never take keyboard ownership
+                // away from Mac or prevent a fresh copy on the next crossing.
+                self.clipboardStatus = "복사 원본 응답 지연 · 입력 연결은 계속합니다. 다음 이동 때 다시 공유합니다."
+                self.traceTransfer("clipboard-read-unavailable", id: id)
+                self.sendEntryAfterClipboard(id)
+                self.updateMenu()
+            }
+        }
+        updateMenu()
+    }
+
+    private func sendClipboardResult(_ result: MacTextClipboard.ReadResult, transferId id: String) {
+        guard automaticHandoff.phase == .acquiring(id), clipboardEnabled else { return }
+        switch result {
         case .text(let snapshot):
             let clipboardId = UUID().uuidString
             guard let frames = TextClipboardWire.frames(snapshot.text, transferId: id, clipboardId: clipboardId) else {
@@ -681,6 +716,8 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     }
 
     private func cancelClipboardTransfer() {
+        pendingClipboardRead = nil
+        clipboardReader.cancel()
         guard let pending = pendingClipboard else { return }
         pendingClipboard = nil
         network.cancelClipboard(pending.id)
@@ -690,9 +727,9 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
     private func setClipboardSharing(_ enabled: Bool) {
         clipboardEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "CrossMouse.shareTextClipboard")
-        if !enabled, let pending = pendingClipboard {
+        if !enabled, let waitingID = pendingClipboard?.transferId ?? pendingClipboardRead?.transferId {
             cancelClipboardTransfer()
-            sendEntryAfterClipboard(pending.transferId)
+            sendEntryAfterClipboard(waitingID)
         }
         clipboardStatus = enabled ? "Windows로 이동할 때 새 텍스트만 공유 · 이미지·파일 제외" : "클립보드 공유 꺼짐"
         updateMenu()
@@ -1218,6 +1255,11 @@ private let crossMouseEventCallback: CGEventTapCallBack = { _, type, event, user
 }
 
 do {
+    // This child mode runs before app startup, pairing-key access, networking,
+    // input capture or login-item setup. Text travels only through private pipes.
+    if let status = TextClipboardReadProcess.runHelperIfRequested(arguments: CommandLine.arguments) {
+        exit(status)
+    }
     if CommandLine.arguments.contains("--startup-self-test") {
         let passed = MacLoginItem.selfTest()
         print(passed ? "PASS Mac login launch classification (no registration changes)" : "FAIL Mac startup classification")

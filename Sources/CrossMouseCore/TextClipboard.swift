@@ -29,14 +29,14 @@ public enum TextClipboardWire {
 /// A named pasteboard is injectable for tests; tests never read .general.
 @MainActor
 public final class MacTextClipboard {
-    public struct Snapshot {
+    public struct Snapshot: Sendable {
         public let changeCount: Int
         public let text: String
     }
-    public enum ReadResult {
+    public enum ReadResult: Sendable {
         case text(Snapshot), unchanged, unavailable, excluded, tooLarge
     }
-    private var acknowledgedChange: Int?
+    public private(set) var acknowledgedChange: Int?
     public init() {}
 
     public func read(_ board: NSPasteboard) -> ReadResult {
