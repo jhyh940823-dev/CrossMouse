@@ -81,6 +81,41 @@ These twenty cycles exercise the production reader subprocess and native
 pasteboard API, not twenty physical Mac/Windows cursor crossings or Windows
 paste commands. The Windows wire payload and receiver source did not change.
 
+## CI and installed application
+
+Runtime source: `3d3d8812d88ded955e9783926f4306b4a96264dc`.
+CI run [44251086797](https://github.com/jhyh940823-dev/CrossMouse/actions/runs/44251086797)
+passed both macOS and Windows jobs. The macOS runner passed all 86 tests and
+ran the actual release helper against the delayed native pasteboard provider:
+the 50 ms main callback ran at 50.79 ms, timeout completed at 1,012.59 ms, and
+the fresh read after cancellation completed in 17.51 ms. All native integration
+cases, including bounded output and child cleanup, passed.
+
+The initial CI run `44249958791` failed three process-lifecycle tests that used
+Python fixtures. Those fixtures were replaced with native children compiled
+before the deadline, retaining the existing assertions and time budgets and
+adding an explicit old-child PID disappearance check. The production reader
+coordinator was unchanged by that replacement. The final native CI comparison
+passed; the initial interpreter-specific failure was not asserted to prove a
+production cancellation defect or a particular Python startup cause. The
+workflow now runs the independent native integration even if a unit test fails,
+while retaining a failed job outcome when any required check fails.
+
+The signed v0.5.5 app was installed at the existing canonical Mac path after a
+CRC- and binary-hash-verified v0.5.4 archive and preferences backup. The original
+process exited normally before replacement. The running v0.5.5 binary hash and
+code signature were verified after launch. Its control window reported paired
+authentication and normal responses from the existing Windows v0.5.2 service,
+installed input capture, clipboard sharing enabled, 37% pointer speed, automatic
+monitor switching enabled and the existing login-item registration.
+
+The saved pointer speed, sharing, automatic-switch and both DDC verification
+preferences were compared before and after installation and remained unchanged.
+No Windows installation, keyboard mapping, pairing reset, login-registration
+mutation or user clipboard-content diagnostic was performed. The application
+is installed and connected; the user's exact physical repeated-copy sequence
+has not been observed to succeed by this validation.
+
 ## Primary API contracts
 
 - [Apple NSPasteboard.string(forType:)](https://developer.apple.com/documentation/appkit/nspasteboard/string(fortype:)) calls `data(forType:)`.
