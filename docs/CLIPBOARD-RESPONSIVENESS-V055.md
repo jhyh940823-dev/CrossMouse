@@ -121,3 +121,54 @@ has not been observed to succeed by this validation.
 - [Apple NSPasteboard.string(forType:)](https://developer.apple.com/documentation/appkit/nspasteboard/string(fortype:)) calls `data(forType:)`.
 - [Apple NSPasteboard.data(forType:)](https://developer.apple.com/documentation/appkit/nspasteboard/data(fortype:)) documents slow-owner IPC timeouts and communication exceptions.
 - Swift task cancellation cannot interrupt an already-running synchronous native call; process isolation supplies the cancellation boundary here.
+
+## Follow-up — 2026-11-18: Simulator clipboard synchronization
+
+After v0.5.5 installation, the user reported that newly copied content still
+failed to paste or was replaced by previously copied content. The earlier
+main-loop blocking fix did not establish that this reported workflow was fixed.
+The named-pasteboard tests above isolate reader behavior; they do not exercise
+other applications synchronizing the Mac general pasteboard.
+
+Live diagnosis found the general pasteboard advertising a text type while a
+text read returned nil and its change count advanced during that read. The
+installed v0.5.5 helper returned `unavailable` in about 35 ms. Access behavior
+reported allowed. Counts continued advancing while idle, without content reads,
+and the types included `com.apple.coredevice.dtpasteboardd.sync`. Four running
+Simulator devices had corresponding `dtpasteboardd` synchronization processes.
+
+A reversible comparison isolated the ownership churn to those synchronization
+processes. These measurements sampled change counts only:
+
+| Condition | Observed change count |
+| --- | --- |
+| Baseline, one second | 851577 → 851585 |
+| Only the four Simulator synchronization processes paused | 11 samples remained at 851585 |
+| The same processes resumed | 851589 → 851603 |
+| Shared clipboard disabled for all four devices | 31 samples over three seconds remained at 854289 |
+
+The configuration correction was to turn off **Edit → Use Shared Clipboard**
+for each of the four running devices in Device Hub. Each device's menu was
+reopened and verified unchecked. Afterward, the **same installed v0.5.5 helper**
+returned a text result in **18.63 ms**. Clipboard payloads and personal device
+names or identifiers are not recorded here. The canonical production source
+contains no Mac pasteboard mutation or periodic clipboard-read loop; its helper
+performs one read for an explicit Windows-entry request.
+
+Three later reads against a newer general-pasteboard change count (`854290`)
+also returned text, in **10.65 ms, 14.98 ms and 16.11 ms**. These were metadata-only
+observations of the installed reader's result, not three distinct copy/paste
+round trips. The diagnostic did not overwrite the general pasteboard or log its
+payload.
+
+This follow-up changed Device Hub configuration; it did not produce or install
+a new CrossMouse build. The comparison confirms an external synchronization
+cause for the observed Mac pasteboard instability and successful recovery of
+the production reader after disabling that synchronization. It does not verify
+the user's physical Mac → Windows paste → Mac → new copy sequence or a Windows
+paste result. Those remain separate from a successful native clipboard read.
+
+[Apple's Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes.md)
+describe Device Hub pasteboard timeout, synchronization-reliability and Universal
+Clipboard synchronization fixes. They provide background context; they do not
+identify which Apple issue caused this particular reproduction.
