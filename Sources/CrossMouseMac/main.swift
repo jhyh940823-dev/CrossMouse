@@ -644,10 +644,15 @@ private final class CrossMouseApp: NSObject, NSApplicationDelegate {
             case .read(let result):
                 self.sendClipboardResult(result, transferId: id)
             case .timedOut, .busy, .failed:
-                // A slow/failed clipboard must never take keyboard ownership
-                // away from Mac or prevent a fresh copy on the next crossing.
-                self.clipboardStatus = "복사 원본 응답 지연 · 입력 연결은 계속합니다. 다음 이동 때 다시 공유합니다."
-                self.traceTransfer("clipboard-read-unavailable", id: id)
+                // Clipboard failure does not grant input; the ordinary
+                // correlated entry still decides keyboard/mouse ownership.
+                if case .timedOut = outcome {
+                    self.clipboardStatus = "복사 원본 응답 지연 · 입력 연결은 계속합니다. 다음 이동 때 다시 공유합니다."
+                    self.traceTransfer("clipboard-read-timeout", id: id)
+                } else {
+                    self.clipboardStatus = "텍스트를 읽지 못했습니다 · 입력 연결은 계속합니다. 다음 이동 때 다시 공유합니다."
+                    self.traceTransfer("clipboard-read-unavailable", id: id)
+                }
                 self.sendEntryAfterClipboard(id)
                 self.updateMenu()
             }

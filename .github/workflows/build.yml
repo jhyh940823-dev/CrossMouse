@@ -12,12 +12,16 @@ jobs:
       - name: Swift tests
         run: swift test
       - name: Build macOS menu bar application
+        id: build_mac
+        if: ${{ !cancelled() }}
         run: |
           bash scripts/build-mac-app.sh
           ditto -c -k --keepParent dist/CrossMouseMac.app dist/CrossMouseMac-macOS.zip
       - name: Mac login/background launch classification
+        if: ${{ !cancelled() && steps.build_mac.outcome == 'success' }}
         run: .build/release/CrossMouseMac --startup-self-test
       - name: Clipboard provider timeout, cancellation and immediate repeated copies
+        if: ${{ !cancelled() && steps.build_mac.outcome == 'success' }}
         timeout-minutes: 2
         run: bash scripts/test-clipboard-responsiveness.sh dist/CrossMouseMac.app/Contents/MacOS/CrossMouseMac
       - uses: actions/upload-artifact@v4

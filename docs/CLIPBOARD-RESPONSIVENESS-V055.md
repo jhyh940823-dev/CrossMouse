@@ -60,8 +60,8 @@ confirmation from unit tests and the isolated native fixture.
 - Full Swift suite: **86 tests passed**, including eight new process lifecycle
   tests. The latter cover cancellation of a child that ignores SIGTERM,
   replacement, deadline expiry, EOF before process exit, bounded malformed
-  output, launch failure and request identity. Test interpreter startup is not
-  used as the production pasteboard performance measurement.
+  output, launch failure and request identity. Native lifecycle fixtures compile
+  before the measured deadline; no interpreter startup is part of that budget.
 - The signed release app passed strict code-signature verification and the
   existing login/background launch self-test without registration changes.
 - `scripts/test-clipboard-responsiveness.sh` ran against that actual signed
